@@ -148,6 +148,107 @@ Music, the same way Liked Music is already a hard exclusion.
 - Deliberately kept out of v2/v3 scope — it's an orthogonal exclusion concern, not mood or multi-provider
   work, and the no-bulk-API constraint makes it a real design task rather than a quick addition.
 
+## v5 — Movies & TV recommendations
+
+Not started. User-requested (2026-08-23): extend re-com beyond music into a second **domain**, not just a
+second provider — recommend movies/TV shows the same way it recommends songs (multi-signal, explainable,
+never something already watched).
+
+**This is a bigger fork than v3 was.** v3 added a second *provider* inside the same domain (songs) and the
+whole point of that work was that `_gather_seed_candidates`, `recommend.py`, `signals.py` needed **zero
+changes** — only `_client()`'s target and the shape-translation layer (`spotify_client.py`) changed. Movies
+and TV are not a second music provider; there is no single sibling `*-mcp` server that plays the
+`ytmusic-mcp`/`spotify-mcp` role (owns auth, exposes a personal watched/watchlist history, exposes
+catalog + related-content signals) the way both music backends do. That server would have to be built
+first, and *which one* is the first open question below rather than a settled decision — unlike v3, where
+Spotify was the obvious second backend from the start.
+
+### Open question 1: what backend plays `ytmusic-mcp`'s role
+
+Three real candidates, each with a different gap relative to what music had for free:
+
+- **Trakt.tv** — closest structural match. Has scrobble/watch-history and a watchlist model that map
+  onto "Liked Music" + playlists fairly directly, plus `related` and `recommendations` endpoints that
+  could stand in for radio/related/artist-expansion. Would need a new sibling `trakt-mcp` server, built
+  the same way `ytmusic-mcp` and `spotify-mcp` were — a purpose-built MCP server that owns Trakt OAuth
+  and exposes tools shaped for this use case, not one of whatever generic Trakt MCP servers may already
+  exist on GitHub (same reasoning `spotify-mcp` used: none matched the read-heavy discovery shape needed
+  here, so building fit better than adapting).
+- **TMDb** — the deepest catalog and genuinely good `/recommendations` and `/similar` endpoints per
+  title, no OAuth needed for read-only catalog data. The gap: **no personal watch history at all.**
+  TMDb has no concept of "what this account has already watched" — that would have to come from
+  somewhere else entirely (a Trakt account linked for history only, or a locally-maintained watched log
+  the same shape `store.py` already keeps for music feedback/history). Strong candidate for the
+  *catalog + signals* half of the job, weak-to-absent for the *exclusion guarantee* half — and the
+  exclusion guarantee is re-com's whole reason to exist, per the Goal section above.
+- **Letterboxd** — has real personal watched/watchlist/diary data, which is the piece TMDb lacks, and is
+  the natural fit for *films* specifically (it has no TV support at all, which alone rules it out as a
+  sole backend for this v5 scope). No official public API, though — anything built against it means
+  scraping the user's own profile pages, a materially less stable foundation than an OAuth'd REST API,
+  and the kind of dependency the `ytmusic-mcp`/`spotify-mcp` pattern was explicitly designed to avoid
+  (both of those talk to real, documented APIs, however restricted).
+
+**No decision made.** A plausible shape given the above: TMDb for catalog/related/similar signals (the
+`radio`/`related`/`artist`-equivalent multi-signal pool) plus Trakt for watched-history and watchlist
+(the exclusion set) — i.e. two data sources behind one `Provider`, mirroring how the music side's mood
+engine (v2) already pulls YouTube's atlas, lyrics, and artist propagation into one label rather than
+trusting a single source. That would still mean building a `trakt-mcp` (or reusing Trakt's own official-ish
+OAuth flow directly, if a first-party auth story turns out to be simple enough not to need a sibling
+server) before anything else here can start.
+
+### What would carry over from the music architecture, and what wouldn't
+
+**Carries over cleanly:**
+- The **hard exclusion guarantee** as the organizing principle — never recommend something already in
+  the equivalent of Liked Music/a playlist, here: already marked watched, or already on a watchlist.
+- The **multi-signal, explainable ranking** design (`_merge_and_score`'s "how many independent signals
+  agree" scoring) — genuinely domain-agnostic; nothing about counting `(seed, source)` hits assumes music.
+- The **`Provider` protocol pattern** from `provider.py` — "an MCP-client facade over a sibling `*-mcp`
+  server that owns that backend's auth" is exactly the shape a `trakt_client.py`/`tmdb_client.py` would
+  take, including re-com holding zero credentials of its own for it.
+- **Read-only, always.** Same reasoning as the music side's "a recommendation engine that also mutates
+  the library can't be trusted to have excluded what it just added" — this server would never mark
+  something watched or touch a watchlist itself.
+- The **mood-vector idea (v2)** is arguably a *better* fit for film/TV than it was for music — mood-based
+  "what should I watch tonight" is a well-worn category (Letterboxd lists, Trakt's own "mood" browsing
+  attempts) and TMDb's keyword/genre metadata is richer and more consistent than YouTube Music's
+  genre-page scraping ever was. Worth treating as a v6-shaped stretch once v5's core exists, not folding
+  into v5 itself.
+
+**Does not carry over / needs real rework:**
+- **`_gather_seed_candidates`'s 3-signal shape is music-specific in substance, not just naming.** Radio
+  (autoplay-style continuation) and artist-expansion (an artist's own catalog) don't have obvious 1:1
+  film/TV analogues — there's no "director expansion" signal with the same density a music artist's
+  back-catalog has, and "similar title" (TMDb `/similar`, Trakt `related`) is closer to the `related`
+  signal alone. A 3-signal design here likely looks more like: similar-title, recommendations-for-title,
+  and cast/director/franchise expansion — needs its own design pass, not a copy of `signals.py`.
+  Realistically this is closer to `_gather_seed_candidates` needing a genuine rewrite than the
+  zero-diff `Provider`-shape-matching trick v3 pulled off for Spotify.
+- **No "seed_sample_size from a playlist" equivalent is obvious.** `recommend_from_playlist` samples
+  tracks from a music playlist as seeds; the closest analogue (sampling from a Trakt list or Letterboxd
+  list) is plausible but untested — lists on those services are usually curated/thematic in a way
+  playlists sometimes aren't, so random sampling might behave differently.
+- **`videoId` as the id field name is even more actively wrong here than it was for Spotify** (see v3's
+  closing note on this). A movies/TV domain is exactly the "third provider" case that note said would
+  force the rename — `videoId` cannot reasonably hold a TMDb/Trakt id. This is also the point where
+  re-com stops being cleanly "one domain, several providers" and needs an explicit `media_type`
+  (`song` / `movie` / `show`) concept threaded through tool responses, since a single MCP server
+  instance recommending both would need to disambiguate what a returned id actually points at.
+- **Separate server instance, same pattern as `re-com-spotify`.** This should almost certainly be a new
+  `re-com-movies` (or similar) MCP server registration, not a mode flag on the existing one — same
+  reasoning as v3's tool-contract answer: keep one call inside one domain, don't merge cross-domain
+  ranking into a single response shape that has to explain itself to a caller.
+
+### Honest scope note
+
+This is closer to standing up a sibling project (`re-com-movies`, its own `trakt-mcp`/`tmdb-mcp`, its own
+`Provider` implementation, its own signal design) than extending the current one. Reasonable first slice,
+if this gets picked up: build the sibling auth server and a single `recommend_from_title` tool against
+TMDb's `/similar` + `/recommendations` alone, with **no** watched-history exclusion yet (explicitly
+documented as a known gap, the way v1's music side never had unexpected silent gaps) — get the
+one-signal-first version working end-to-end before deciding whether Trakt is worth the second OAuth
+integration just for the exclusion guarantee.
+
 ## Build status
 
 **Done:**
