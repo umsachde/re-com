@@ -11,6 +11,8 @@ agreement between independent signals the thing that ranks, rather than trust
 in any one algorithm.
 """
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from provider import ProviderError
@@ -19,6 +21,12 @@ _SOURCE_RADIO = "radio"
 _SOURCE_RELATED = "related"
 _SOURCE_ARTIST = "artist"
 _RELATED_ARTISTS_TO_EXPAND = 2  # how many of the seed artist's related artists to also pull top songs from
+
+# How many seeds to gather concurrently. Capped rather than unbounded: a
+# playlist-seeded mood request can carry 20 seeds, and 20 x ~4 in-flight calls
+# is exactly the rate-limit exposure PLAN.md warned about. Six keeps the
+# common case (SEED_COUNT seeds) fully parallel while bounding the worst one.
+SEED_WORKERS = int(os.environ.get("RECOM_SEED_WORKERS", "6"))
 
 # Every provider (ytmusic-mcp, spotify-mcp, ...) already translates its own
 # auth/rate-limit/gated/network failures into a ProviderError subclass with a
@@ -124,6 +132,58 @@ def _gather_seed_candidates(
                     add(s, _SOURCE_ARTIST)
 
     return found
+
+
+def gather_seeds(
+    yt: Any,
+    seed_video_ids: Any,
+    *,
+    skip_failures: bool = True,
+    max_workers: int | None = None,
+) -> list[dict[str, dict[str, Any]]]:
+    """Gather candidates for several seeds at once.
+
+    Each seed costs ~4 sequential network round-trips and no seed depends on
+    any other -- _merge_and_score just pools them -- so running them serially
+    made a six-seed mood request take the sum of all six (~18s measured)
+    instead of roughly its slowest one.
+
+    Safe to thread because a Provider is a synchronous facade over a single
+    asyncio loop on its own thread (see ytmusic_client.YTMusicClient): calls
+    are submitted with run_coroutine_threadsafe and the MCP session
+    multiplexes concurrent requests over stdio by request id, so N caller
+    threads blocking on N in-flight calls is the shape it's already built for.
+
+    Results keep the order of `seed_video_ids` so a run stays reproducible.
+    With `skip_failures` a dead seed is dropped rather than sinking the whole
+    request; without it the first failure propagates, which is what the v1
+    similarity tools want (a seed that fails there is the *only* seed).
+    """
+    ids = [vid for vid in seed_video_ids if vid]
+    if not ids:
+        return []
+
+    # One seed doesn't need a pool, and staying on this thread keeps the
+    # single-seed path (recommend_from_song) exactly as it was.
+    if len(ids) == 1:
+        try:
+            return [_gather_seed_candidates(yt, ids[0])]
+        except Exception:  # noqa: BLE001 - honour skip_failures uniformly
+            if not skip_failures:
+                raise
+            return []
+
+    workers = max_workers or min(len(ids), max(1, SEED_WORKERS))
+    out: list[dict[str, dict[str, Any]]] = []
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="recom-seed") as pool:
+        futures = [pool.submit(_gather_seed_candidates, yt, vid) for vid in ids]
+        for future in futures:
+            try:
+                out.append(future.result())
+            except Exception:  # noqa: BLE001 - one dead seed must not sink the request
+                if not skip_failures:
+                    raise
+    return out
 
 
 def _merge_and_score(per_seed: list[dict[str, dict[str, Any]]]) -> dict[str, dict[str, Any]]:

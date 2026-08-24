@@ -543,7 +543,26 @@ def log_recommendations(
     return len(rows)
 
 
-def put_feedback(conn: sqlite3.Connection, video_id: str, reaction: str, source: str = "explicit") -> None:
+# Reactions the listener states outright, and the ones only inferred from
+# behaviour (see infer_implicit_feedback). Kept apart deliberately: only the
+# stated ones are ever allowed to hard-exclude a song.
+EXPLICIT_SOURCE = "explicit"
+IMPLICIT_SOURCE = "implicit"
+
+REACTION_PLAYED = "played"
+REACTION_IGNORED = "ignored"
+
+POSITIVE_REACTIONS = ("loved", "saved", REACTION_PLAYED)
+NEGATIVE_REACTIONS = ("skipped", "wrong_mood", REACTION_IGNORED)
+
+# How many history snapshots must have been taken *after* a song was
+# recommended before its continued absence from them means anything. Below
+# this, "not played" is far more likely to mean "the cron hasn't run yet" than
+# "they didn't want it".
+IGNORED_AFTER_SNAPSHOTS = 3
+
+
+def put_feedback(conn: sqlite3.Connection, video_id: str, reaction: str, source: str = EXPLICIT_SOURCE) -> None:
     conn.execute(
         "INSERT INTO feedback (video_id, reaction, source, at) VALUES (?, ?, ?, ?)",
         (video_id, reaction, source, time.time()),
@@ -561,12 +580,143 @@ def feedback_for(conn: sqlite3.Connection, video_id: str) -> list[dict[str, Any]
 
 
 def rejected_video_ids(conn: sqlite3.Connection) -> set[str]:
-    """Songs the user has actively pushed away -- never serve these again."""
+    """Songs the user has actively pushed away -- never serve these again.
+
+    Deliberately explicit-only. A permanent hard exclusion is the strongest
+    thing this system can do to a song, and inferred evidence has no business
+    triggering it: "recommended, then never showed up in the history log" has
+    plenty of innocent explanations (they never opened the playlist, the cron
+    missed it, they listened on another device). Implicit feedback demotes in
+    ranking instead -- see recommend.artist_affinity.
+    """
     return {
         r["video_id"]
         for r in conn.execute(
-            "SELECT DISTINCT video_id FROM feedback WHERE reaction IN ('skipped', 'wrong_mood')"
+            "SELECT DISTINCT video_id FROM feedback "
+            "WHERE reaction IN ('skipped', 'wrong_mood') "
+            "  AND (source IS NULL OR source != ?)",
+            (IMPLICIT_SOURCE,),
         )
+    }
+
+
+def infer_implicit_feedback(
+    conn: sqlite3.Connection, min_snapshots: int = IGNORED_AFTER_SNAPSHOTS
+) -> dict[str, int]:
+    """Learn from what was recommended by diffing it against what got played.
+
+    `record_feedback` only ever fires when someone remembers to call it, which
+    in practice is almost never -- so the explicit feedback table stays empty
+    while two other tables quietly accumulate everything needed to infer the
+    same thing: `recommendation` (what was served, and when) and `history_log`
+    (what was actually listened to, with a real local timestamp).
+
+    Joining them gives two signals for free:
+
+    - **played**: the song turned up in the history log *after* it was
+      recommended. Strong evidence the recommendation landed.
+    - **ignored**: it didn't, and at least `min_snapshots` history snapshots
+      have been taken since, so there was real listening to have shown up in.
+      Weak evidence, and treated as such -- it demotes, never excludes.
+
+    Idempotent: re-running records nothing new. Safe (and cheap -- pure local
+    SQL, no network) to call on every recommendation.
+    """
+    rows = conn.execute(
+        "WITH served AS ("
+        "  SELECT video_id, MIN(served_at) AS first_served FROM recommendation"
+        "   WHERE served_at IS NOT NULL GROUP BY video_id"
+        ") "
+        "SELECT s.video_id, "
+        "  EXISTS (SELECT 1 FROM history_log h "
+        "           WHERE h.video_id = s.video_id AND h.observed_at > s.first_served) AS played, "
+        "  (SELECT COUNT(DISTINCT h2.observed_at) FROM history_log h2 "
+        "    WHERE h2.observed_at > s.first_served) AS snapshots_since "
+        "FROM served s"
+    ).fetchall()
+
+    already: dict[str, set[str]] = {}
+    for r in conn.execute(
+        "SELECT DISTINCT video_id, reaction FROM feedback WHERE source = ?", (IMPLICIT_SOURCE,)
+    ):
+        already.setdefault(r["video_id"], set()).add(r["reaction"])
+
+    stamp = time.time()
+    new_rows, retracted, pending = [], [], 0
+    for row in rows:
+        video_id, seen = row["video_id"], already.get(row["video_id"], set())
+        if row["played"]:
+            # A song inferred "ignored" that later got played was simply
+            # inferred wrong -- drop the bad row rather than letting a stale
+            # penalty sit alongside the evidence that contradicts it.
+            if REACTION_IGNORED in seen:
+                retracted.append(video_id)
+            if REACTION_PLAYED not in seen:
+                new_rows.append((video_id, REACTION_PLAYED, IMPLICIT_SOURCE, stamp))
+        elif row["snapshots_since"] >= min_snapshots:
+            if REACTION_IGNORED not in seen:
+                new_rows.append((video_id, REACTION_IGNORED, IMPLICIT_SOURCE, stamp))
+        else:
+            pending += 1
+
+    with conn:
+        if retracted:
+            conn.executemany(
+                "DELETE FROM feedback WHERE video_id = ? AND reaction = ? AND source = ?",
+                [(v, REACTION_IGNORED, IMPLICIT_SOURCE) for v in retracted],
+            )
+        if new_rows:
+            conn.executemany(
+                "INSERT INTO feedback (video_id, reaction, source, at) VALUES (?, ?, ?, ?)",
+                new_rows,
+            )
+
+    return {
+        "considered": len(rows),
+        "played": sum(1 for r in new_rows if r[1] == REACTION_PLAYED),
+        "ignored": sum(1 for r in new_rows if r[1] == REACTION_IGNORED),
+        "retracted": len(retracted),
+        "pending": pending,
+    }
+
+
+def feedback_counts(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """Per-song positive/negative reaction tallies, explicit and implicit.
+
+    Both sources are pooled on purpose: a stated `loved` and an observed
+    `played` are evidence of the same thing, differing in strength rather than
+    in kind, and the caller (recommend.artist_affinity) bounds how far any
+    amount of either can move a ranking.
+    """
+    counts: dict[str, dict[str, int]] = {}
+    for r in conn.execute("SELECT video_id, reaction FROM feedback"):
+        tally = counts.setdefault(r["video_id"], {"positive": 0, "negative": 0})
+        if r["reaction"] in POSITIVE_REACTIONS:
+            tally["positive"] += 1
+        elif r["reaction"] in NEGATIVE_REACTIONS:
+            tally["negative"] += 1
+    return counts
+
+
+def feedback_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    """How much has been learned so far, so an empty loop is visible."""
+    by_source = {
+        (r["source"] or EXPLICIT_SOURCE, r["reaction"]): r["n"]
+        for r in conn.execute(
+            "SELECT source, reaction, COUNT(*) AS n FROM feedback GROUP BY source, reaction"
+        )
+    }
+    served = conn.execute(
+        "SELECT COUNT(DISTINCT video_id) AS n FROM recommendation"
+    ).fetchone()["n"]
+    snapshots = conn.execute(
+        "SELECT COUNT(DISTINCT observed_at) AS n FROM history_log"
+    ).fetchone()["n"]
+    return {
+        "recommended_songs": served,
+        "history_snapshots": snapshots,
+        "explicit": {k[1]: v for k, v in by_source.items() if k[0] == EXPLICIT_SOURCE},
+        "implicit": {k[1]: v for k, v in by_source.items() if k[0] == IMPLICIT_SOURCE},
     }
 
 

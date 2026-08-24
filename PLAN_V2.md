@@ -494,12 +494,73 @@ Re-measure with `python scripts/label_library.py --report` once the crawl finish
 
 ### Known gaps
 
-- **`recommend_for_mood` takes ~18s.** Six seeds × ~4 API calls each, run serially. Threading the seed
-  gathering is the obvious fix and is not done.
+- ~~**`recommend_for_mood` takes ~18s.**~~ **Done (2026-08-23)** — see below.
 - **The Claude labelling path has never run against the real API** — only against a fake client in tests.
 - **Anchor vectors are hand-authored first drafts.** They have not been tuned against real listening.
-- **No implicit feedback yet.** Diffing past recommendations against later history is the highest-value
-  remaining piece, because it costs the user nothing.
+- ~~**No implicit feedback yet.**~~ **Done (2026-08-23)** — see below.
+
+---
+
+## 2026-08-23 session — the two remaining gaps above, closed
+
+### Implicit feedback
+
+`record_feedback` only fires when someone remembers to call it, which in practice is never — the explicit
+feedback table had **1 row** on the real account after weeks of use, against 156 recommended songs. But
+the two tables needed to infer the same thing were already accumulating: `recommendation` (what was
+served, when) and `history_log` (what was played, timestamped by the cron'd `snapshot_history.py`).
+
+`store.infer_implicit_feedback` diffs them. Design decisions worth keeping:
+
+- **Inferred evidence never hard-excludes.** This is the whole reason `played`/`ignored` are separate
+  reaction names rather than reusing `skipped`. A permanent ban is the strongest thing this system can do
+  to a song and "didn't show up in the history log" has too many innocent explanations — they never
+  opened the playlist, they listened elsewhere, the cron missed a window. `rejected_video_ids` grew an
+  explicit-only source guard so a future inference can't silently start banning things either.
+- **A "not played" verdict needs ≥3 snapshots to have been taken since.** Below that, absence means "the
+  cron hasn't run" far more often than "they didn't want it". Songs under the threshold report as
+  `pending` — on the real account 149 of 156 were pending, exactly as expected with only 2 snapshots
+  recorded so far. **The signal is real but slow**, and that's inherent: it grows with the cron, not with
+  usage.
+- **Retraction, not just accumulation.** A song inferred `ignored` that later gets played had its
+  inference proven wrong; the row is deleted rather than left as a stale penalty beside contradicting
+  evidence.
+- **Applied per artist, not per song.** A played song usually gets liked, at which point the library
+  exclusion means it can never be recommended again — so the song-level signal is nearly worthless and
+  the direction it pointed in is the whole value. Bounded 0.75–1.25, saturating at 3 net reactions:
+  this is mostly *inferred* evidence and it should break ties, not overrule retrieval. Surfaced as
+  `affinity` on the result so a nudge is explainable rather than an unexplained reordering.
+
+First live run: 156 songs considered, 7 `played` inferred, 0 `ignored` (correctly held back by the
+snapshot threshold), 7 artists with a learned affinity.
+
+### Concurrent seed gathering
+
+The ~18s was six seeds × ~4 sequential round-trips. No seed depends on any other and `_merge_and_score`
+pools them regardless, so this was serial only because it was written that way.
+
+`signals.gather_seeds` replaces three separate serial loops (`recommend.build`, `recommend.bridge_expand`,
+`server.recommend_from_playlist`). Measured on the real account, same six seeds: **18.9s → 3.1s (6.1x)**,
+and `recommend_for_mood` end-to-end **~18s → 5.7s**.
+
+- **Threading is safe here for a specific reason**, not by luck: a `Provider` is a synchronous facade over
+  one asyncio loop on a dedicated thread, calls go through `run_coroutine_threadsafe`, and the MCP session
+  multiplexes concurrent requests over stdio by request id. N caller threads blocking on N in-flight calls
+  is the shape it was already built for.
+- **Concurrency is capped (`RECOM_SEED_WORKERS`, default 6), not unbounded.** A playlist-seeded mood
+  request carries up to 20 seeds; 20 × ~4 simultaneous requests is precisely the rate-limit exposure
+  PLAN.md flagged as a v2 concern. The cap keeps the common case fully parallel while bounding the worst.
+- **Failure semantics differ per call site and are now explicit.** `skip_failures=True` (the mood paths)
+  drops a dead seed; `skip_failures=False` preserves `recommend_from_playlist`'s existing contract of
+  surfacing the error. Note this guard is for *unexpected* crashes — provider errors are already absorbed
+  per-signal one level down, so a seed whose signals all fail returns `{}` rather than raising.
+- **A false alarm worth recording.** Serial and concurrent runs returned different candidate sets, which
+  looked like a threading bug. It isn't: two *serial* runs of the same seeds overlap only **0.793**, while
+  serial vs. concurrent overlaps **0.819** — YouTube's radio is non-deterministic per call. Checking
+  serial-against-serial before blaming the change is the general lesson; the same trap is available for
+  anything measured against this API.
+- Tests prove concurrency with a `threading.Barrier` (which can only clear if every seed is in flight
+  simultaneously) rather than a wall-clock assertion that could pass by luck on a fast machine.
 
 ---
 

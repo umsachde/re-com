@@ -48,6 +48,17 @@ _ENERGY_WINDOW = 0.3
 KNOWN_ARTIST_BOOST = 1.15
 ATLAS_SOURCE = "mood-playlist"
 
+# How far feedback on past recommendations is allowed to move an artist's
+# candidates. Bounded tightly and on purpose: most of this evidence is
+# *inferred* (store.infer_implicit_feedback), and signal agreement between
+# independent discovery sources is the thing this engine actually trusts. A
+# learned preference should break ties, not overrule retrieval.
+AFFINITY_MAX_BOOST = 1.25
+AFFINITY_MAX_PENALTY = 0.75
+# Net reactions at which the multiplier saturates. Low, because the counts are
+# small -- but it means one stray reaction can't swing an artist to the extreme.
+AFFINITY_SATURATION = 3
+
 # Free-text mood words. Claude is expected to pass a precise `vector` for
 # anything nuanced; this exists so the tool still works when it doesn't, and
 # for words the anchor names don't cover.
@@ -304,6 +315,41 @@ def atlas_neighbours(conn: Any, target: dict[str, float], limit: int = ATLAS_NEI
     return scored[:limit]
 
 
+def artist_affinity(conn: Any) -> dict[str, float]:
+    """A per-artist ranking multiplier learned from how past picks landed.
+
+    Feedback arrives per *song*, but its useful signal is per *artist*: a song
+    that was played is usually then liked, at which point the library exclusion
+    means it can never be recommended again anyway. What survives is the
+    direction it pointed in -- this artist's neighbourhood is worth more of.
+
+    Returns only artists with a non-zero net, so the common case (no feedback
+    yet) is an empty dict and the ranking below is unchanged.
+    """
+    counts = store.feedback_counts(conn)
+    if not counts:
+        return {}
+
+    net: dict[str, int] = {}
+    for video_id, tally in counts.items():
+        track = store.get_track(conn, video_id) or {}
+        artist = label.primary_artist(track.get("artists"))
+        if not artist:
+            continue
+        net[artist] = net.get(artist, 0) + tally["positive"] - tally["negative"]
+
+    affinity: dict[str, float] = {}
+    for artist, score in net.items():
+        if not score:
+            continue
+        strength = min(abs(score), AFFINITY_SATURATION) / AFFINITY_SATURATION
+        if score > 0:
+            affinity[artist] = 1.0 + (AFFINITY_MAX_BOOST - 1.0) * strength
+        else:
+            affinity[artist] = 1.0 - (1.0 - AFFINITY_MAX_PENALTY) * strength
+    return affinity
+
+
 def _library_artists(conn: Any) -> set[str]:
     return {
         label.primary_artist(r["artists"])
@@ -351,12 +397,7 @@ def bridge_expand(
             break
         bridges = sorted(found.values(), key=lambda c: -c.get("base_score", 0))[:max_bridges]
 
-        per_seed = []
-        for bridge in bridges:
-            try:
-                per_seed.append(signals._gather_seed_candidates(yt, bridge["videoId"]))
-            except Exception:  # noqa: BLE001 - a dead bridge shouldn't sink the expansion
-                continue
+        per_seed = signals.gather_seeds(yt, [bridge["videoId"] for bridge in bridges])
         if not per_seed:
             break
 
@@ -496,12 +537,7 @@ def build(
         seeds = pick_seeds(conn, target, genres=genres)
     notes = list(resolved.get("evidence", []))
 
-    per_seed = []
-    for seed in seeds:
-        try:
-            per_seed.append(signals._gather_seed_candidates(yt, seed["videoId"]))
-        except Exception:  # noqa: BLE001 - one dead seed must not sink the request
-            continue
+    per_seed = signals.gather_seeds(yt, [seed["videoId"] for seed in seeds])
 
     merged = signals._merge_and_score(per_seed)
 
@@ -543,12 +579,15 @@ def build(
 
     moods = label.resolve_or_derive(conn, pool.keys())
     known_artists = _library_artists(conn)
+    affinity = artist_affinity(conn)
 
     candidates = []
     for video_id, candidate in pool.items():
         entry = moods.get(video_id)
         artist = label.primary_artist(" & ".join(candidate["artists"] or []))
-        boost = KNOWN_ARTIST_BOOST if artist and artist in known_artists else 1.0
+        known = bool(artist and artist in known_artists)
+        learned = affinity.get(artist, 1.0) if artist else 1.0
+        boost = (KNOWN_ARTIST_BOOST if known else 1.0) * learned
         candidates.append(
             {
                 "videoId": video_id,
@@ -560,7 +599,10 @@ def build(
                 "mood": entry["vector"] if entry else None,
                 "mood_source": entry["source"] if entry else None,
                 "base_score": candidate["score"] * boost,
-                "known_artist": bool(boost > 1.0),
+                "known_artist": known,
+                # Surfaced so a nudge from learned feedback is explainable
+                # rather than an unexplained reordering. Omitted when 1.0.
+                **({"affinity": round(learned, 3)} if learned != 1.0 else {}),
             }
         )
 

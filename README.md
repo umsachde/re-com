@@ -18,7 +18,7 @@ It's built to do better than a streaming service's built-in radio/autoplay by po
 | `recommend_from_playlist_for_mood(playlist_id, feeling=None, vector=None, context=None, arc="mirror", limit=20, seed_cap=None, ...)` | **v2.** Mood *and* a playlist together: reads every track, seeds only from the ones that genuinely fit. See [Mood + one playlist](#mood--one-playlist). |
 | `read_my_mood()` | **v2.** Infer your current mood from recent listening, *with the evidence for it*. |
 | `explain_recommendation(video_id)` | **v2.** Why a song was picked, in mood terms. |
-| `record_feedback(video_id, reaction)` | **v2.** `loved` / `saved` / `skipped` / `wrong_mood`. Rejections are never recommended again. |
+| `record_feedback(video_id, reaction)` | **v2.** `loved` / `saved` / `skipped` / `wrong_mood`. Rejections are never recommended again. See also [implicit feedback](#learning-without-being-told), which needs no call at all. |
 | `index_status()` | **v2.** How much of the mood index exists, so gaps are visible instead of silent. |
 
 All three tools guarantee every result is absent from Liked Music *and* from every one of your playlists, not just the one you seeded from (if any). `recommend_from_song` additionally never returns the seed song itself; `recommend_from_playlist` additionally never returns anything from the seed playlist even if that playlist somehow isn't in your library listing.
@@ -163,6 +163,35 @@ Watch **cross-mood overlap**, not just mean fit. An early build scored a healthy
 returning 70% the same songs for "heartbroken" and "angry"; fit alone couldn't see it. Current numbers:
 mean fit 0.848, cross-mood overlap 0.064, 63 distinct songs across 80 slots.
 
+### Learning without being told
+
+`record_feedback` only fires when someone remembers to call it, which in practice is almost never — so
+the engine also learns from what it can observe. Two tables it already keeps are enough: `recommendation`
+(what was served, and when) and `history_log` (what was actually played, timestamped by
+`scripts/snapshot_history.py`). Diffing them yields two signals for free:
+
+| Inferred | When | Strength |
+| --- | --- | --- |
+| `played` | The song turned up in the history log *after* being recommended. | Strong — the recommendation landed. |
+| `ignored` | It didn't, and ≥3 history snapshots have been taken since, so there was real listening it could have shown up in. | Weak, and treated as such. |
+
+The threshold matters: below it, "not played" almost always means "the cron hasn't run yet" rather than
+"they didn't want it". Songs under it are reported as `pending` and nothing is inferred.
+
+**Inferred evidence never hard-excludes.** A stated `skipped`/`wrong_mood` bans a song permanently;
+`ignored` only demotes, because absence from a history log has too many innocent explanations (they never
+opened the playlist, they listened on another device). The two live in the same table under different
+`source` values, and `rejected_video_ids` reads only the explicit ones.
+
+What's learned is applied **per artist**, not per song — a song that got played usually gets liked, at
+which point the library exclusion means it can never be recommended again anyway. What survives is the
+direction it pointed in. The multiplier is bounded to 0.75–1.25 and saturates at 3 net reactions, so a
+learned preference breaks ties without overruling signal agreement, and any nudge it applies is reported
+in the result's `affinity` field rather than silently reordering things.
+
+Inference runs automatically on every mood recommendation (pure local SQL, ~5ms, idempotent) — there's
+nothing to schedule. `index_status()` reports what's accumulated so far.
+
 ### Setup
 
 ```bash
@@ -201,6 +230,7 @@ local timestamps are the only clock this system will ever have:
 | `RECOM_JUDGE_MODEL` | `claude-opus-5` | Model for lyric-based labelling. |
 | `RECOM_JUDGE_EFFORT` | `low` | Effort level for that labelling. |
 | `RECOM_JUDGE_BATCH` | `12` | Songs per labelling request. |
+| `RECOM_SEED_WORKERS` | `6` | How many seeds are gathered concurrently. See [Speed](#speed). |
 
 Everything mood-related is stored in local SQLite. The only thing that ever leaves the machine is,
 optionally, song titles and lyric excerpts sent to the Claude API for labelling.
@@ -277,6 +307,28 @@ dropping them would quietly delete whole languages from the results.
 
 Build the index with `python scripts/build_tempo.py` (~0.4s/song, cached permanently
 including the misses).
+
+## Speed
+
+Two costs dominate a recommendation: building the library exclusion set (solved by the
+[library cache](#library-cache) below) and gathering candidates from each seed.
+
+Each seed costs ~4 sequential network round-trips, and a mood recommendation uses six seeds. Run
+serially that's the sum of all six; nothing about it needs to be, since no seed depends on another and
+the results are pooled regardless. Measured on the real account, same six seeds:
+
+| | Serial | Concurrent |
+| --- | --- | --- |
+| Seed gathering | 18.9s | **3.1s** |
+| `recommend_for_mood` end to end | ~18s | **5.7s** |
+
+Concurrency is **capped** (`RECOM_SEED_WORKERS`, default 6) rather than unbounded: a playlist-seeded mood
+request can carry 20 seeds, and 20 × ~4 simultaneous in-flight requests is exactly the rate-limit exposure
+worth avoiding. Lower it if a backend starts throttling.
+
+**Results are not identical run-to-run, and weren't before this either.** YouTube's radio is
+non-deterministic — measured, two *serial* runs of the same seeds overlap only 0.793, while serial vs.
+concurrent overlaps 0.819. Concurrency is not what varies the output; the API is.
 
 ## Library cache
 
@@ -376,7 +428,13 @@ Check coverage with:
 pytest --cov=server --cov-report=term-missing
 ```
 
-318 tests across the whole project. `tests/test_v2.py` covers the mood engine — the vector space, arcs, label resolution and artist propagation, the atlas crawler's resume and rate-limit behaviour, lyric caching, mood sensing, the Claude judge (against a fake client), and every v2 tool end to end (YouTube-only, per the mood engine's atlas dependency noted above). What remains uncovered is `_client()`'s real `YTMusicClient()`/`SpotifyClient()` construction (which actually spawns the sibling `*-mcp` subprocess) and the `if __name__ == "__main__"` entrypoint, neither meaningfully testable without a live connection.
+355 tests across the whole project. `tests/test_feedback.py` covers implicit feedback (the
+recommendation/history diff, its idempotence, retraction of a wrong `ignored` verdict, and the guarantee
+that inferred evidence never reaches the hard-exclusion set) and the bounded artist affinity it feeds.
+`tests/test_concurrency.py` covers concurrent seed gathering — that it really is concurrent (proved with
+a `threading.Barrier`, which can only clear if every seed is in flight at once, rather than a timing
+assertion that could pass by luck), that it stays within the worker cap, and that each call site's
+failure semantics are preserved. `tests/test_v2.py` covers the mood engine — the vector space, arcs, label resolution and artist propagation, the atlas crawler's resume and rate-limit behaviour, lyric caching, mood sensing, the Claude judge (against a fake client), and every v2 tool end to end (YouTube-only, per the mood engine's atlas dependency noted above). What remains uncovered is `_client()`'s real `YTMusicClient()`/`SpotifyClient()` construction (which actually spawns the sibling `*-mcp` subprocess) and the `if __name__ == "__main__"` entrypoint, neither meaningfully testable without a live connection.
 
 `conftest.py` redirects both the library cache and the SQLite store to temp paths for every test, so runs never touch your real data.
 

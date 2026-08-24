@@ -120,6 +120,7 @@ from signals import (  # noqa: E402
     _gather_seed_candidates,
     _merge_and_score,
     _norm_track,
+    gather_seeds,
     same_song,
 )
 
@@ -504,7 +505,10 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
 
     sample = tracks if len(tracks) <= seed_sample_size else random.sample(tracks, seed_sample_size)
 
-    per_seed = [_gather_seed_candidates(yt, t["videoId"]) for t in sample]
+    # skip_failures=False keeps this tool's existing contract: a seed that
+    # fails here surfaces as a clear error via handle_errors rather than
+    # quietly shrinking the candidate pool.
+    per_seed = gather_seeds(yt, [t["videoId"] for t in sample], skip_failures=False)
     merged = _merge_and_score(per_seed)
 
     exclude = _library_video_ids(yt) | {t["videoId"] for t in tracks}
@@ -686,6 +690,10 @@ def recommend_for_mood(
 
     yt = _client()
     conn = _store()
+    # Learn from earlier rounds before ranking this one. Local SQL only, and
+    # idempotent, so it's cheap enough to run on every call rather than
+    # needing its own cron.
+    _s.infer_implicit_feedback(conn)
     exclude = _library_video_ids(yt) | _s.rejected_video_ids(conn)
 
     result = recommend.build(
@@ -751,6 +759,7 @@ def recommend_from_playlist_for_mood(
 
     yt = _client()
     conn = _store()
+    _s.infer_implicit_feedback(conn)  # same reasoning as recommend_for_mood
 
     playlist = yt.get_playlist(playlist_id, limit=None)
     tracks = [t for t in playlist.get("tracks", []) if t.get("videoId")]
@@ -904,9 +913,11 @@ def index_status() -> dict[str, Any]:
     import store as _s
 
     conn = _store()
+    _s.infer_implicit_feedback(conn)
     return {
         "atlas": _s.atlas_stats(conn),
         "library": label.library_coverage(conn),
+        "feedback": _s.feedback_stats(conn),
         "llm_labelling": {
             "available": judge.available(),
             "model": judge.MODEL,
