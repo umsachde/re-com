@@ -14,6 +14,13 @@ Configured via RECOM_YTMUSIC_MCP_COMMAND (interpreter) and
 RECOM_YTMUSIC_MCP_ARGS (space-separated args, typically just ytmusic-mcp's
 server.py path) -- the same command/args split `claude mcp add` uses to
 register ytmusic-mcp itself.
+
+ytmusic-mcp reads its auth headers path (YTMUSIC_AUTH_PATH) from its
+environment, so that's forwarded from re-com's environment into the
+subprocess -- see `_subprocess_env`. Without that forwarding, MCP's stdio
+client hands the child only a minimal safe environment
+(PATH/HOME/USER/...), and ytmusic-mcp fails with an invalid-auth error even
+though re-com itself was configured with the path.
 """
 
 import asyncio
@@ -25,7 +32,7 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import get_default_environment, stdio_client
 
 from provider import ProviderError
 
@@ -37,6 +44,19 @@ CONFIG_HELP = (
     "and RECOM_YTMUSIC_MCP_ARGS (its server.py path) so re-com can reach YouTube "
     "Music through it -- see README."
 )
+
+
+def _subprocess_env() -> dict[str, str]:
+    """MCP's minimal default child environment plus ytmusic-mcp's own config.
+
+    `stdio_client` deliberately doesn't inherit the parent's whole
+    environment, so anything ytmusic-mcp needs has to be passed explicitly.
+    """
+    env = get_default_environment()
+    env.update(
+        {k: v for k, v in os.environ.items() if k.startswith("YTMUSIC_")}
+    )
+    return env
 
 
 class YTMusicMCPError(ProviderError):
@@ -80,7 +100,9 @@ class YTMusicClient:
 
     async def _connect(self) -> None:
         self._stack = AsyncExitStack()
-        params = StdioServerParameters(command=self._command, args=self._args)
+        params = StdioServerParameters(
+            command=self._command, args=self._args, env=_subprocess_env()
+        )
         read, write = await self._stack.enter_async_context(stdio_client(params))
         session = await self._stack.enter_async_context(ClientSession(read, write))
         await session.initialize()

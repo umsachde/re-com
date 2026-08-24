@@ -37,6 +37,14 @@ Configured via RECOM_SPOTIFY_MCP_COMMAND (interpreter) and
 RECOM_SPOTIFY_MCP_ARGS (space-separated args, typically just spotify-mcp's
 server.py path) -- the same command/args split `claude mcp add` uses to
 register spotify-mcp itself.
+
+spotify-mcp reads its own credentials (SPOTIFY_CLIENT_ID/SECRET) and token
+cache location (SPOTIFY_CACHE_PATH) from its environment, so those are
+forwarded from re-com's environment into the subprocess -- see
+`_subprocess_env`. Without that forwarding, MCP's stdio client hands the
+child only a minimal safe environment (PATH/HOME/USER/...), and spotify-mcp
+fails every call with "SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must be
+set" even though re-com itself was configured with them.
 """
 
 import asyncio
@@ -48,7 +56,7 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import get_default_environment, stdio_client
 
 from provider import ProviderError
 
@@ -101,6 +109,19 @@ def _artist_from_spotify(item: dict[str, Any] | None) -> dict[str, Any]:
     return {"artist": item.get("name"), "browseId": item.get("id")}
 
 
+def _subprocess_env() -> dict[str, str]:
+    """MCP's minimal default child environment plus spotify-mcp's own config.
+
+    `stdio_client` deliberately doesn't inherit the parent's whole
+    environment, so anything spotify-mcp needs has to be passed explicitly.
+    """
+    env = get_default_environment()
+    env.update(
+        {k: v for k, v in os.environ.items() if k.startswith("SPOTIFY_")}
+    )
+    return env
+
+
 class SpotifyClient:
     """Synchronous facade over a persistent spotify-mcp subprocess.
 
@@ -137,7 +158,9 @@ class SpotifyClient:
 
     async def _connect(self) -> None:
         self._stack = AsyncExitStack()
-        params = StdioServerParameters(command=self._command, args=self._args)
+        params = StdioServerParameters(
+            command=self._command, args=self._args, env=_subprocess_env()
+        )
         read, write = await self._stack.enter_async_context(stdio_client(params))
         session = await self._stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
