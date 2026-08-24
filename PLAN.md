@@ -126,6 +126,139 @@ Open design questions from before this session, kept for the reasoning trail:
 - **Tool contract question:** does `recommend_from_song`/`recommend_from_playlist` gain a `provider` argument, or does provider selection happen at the MCP-server-instance level (e.g. a separately configured `re-com-spotify` server)? Whichever it is, a single call should almost certainly stay within one provider — cross-provider merging (e.g. seeding from a YouTube Music playlist but recommending Spotify tracks) is out of scope unless a future agent has a concrete reason to want it.
 - **IDs are provider-specific.** `video_id` is currently baked into the tool signatures and output (`videoId` field) as YouTube Music terminology. This session deliberately left that rename undone (see git history/PLAN discussion around 2026-08-19) rather than doing it speculatively — but it's the first thing to revisit once a second provider actually exists, since Spotify track IDs/URIs aren't YouTube video IDs.
 
+## v6 — Provider-agnostic engine on a neutral music graph
+
+**The goal changed (user, 2026-08-23):** re-com is to be a recommendation *app* — whichever service the
+user connects (YouTube Music, Spotify, others later), it takes that library and applies the same logic.
+v3 made the *backend* swappable; it did not make the *engine* portable, and measuring why is what this
+section records.
+
+### What forced the redesign: Spotify's API is gutted
+
+Measured directly against the real app registration (2026-08-23), not inferred from docs:
+
+| Works | Dead |
+| --- | --- |
+| saved tracks, playlists, recently played, top tracks/artists | `/recommendations` (404) |
+| `search` (tracks, artists, playlists) | `artist_related_artists` (403) |
+| `track`, `artist`, `artist_albums` → `album_tracks` | `artist_top_tracks` (403) |
+| | `audio_features` / `audio_analysis` (403) |
+| | reading **any other user's playlist** (403) |
+| | `categories`, `featured_playlists`, `new_releases` (403) |
+
+This is the post-Nov-2024 restriction for app registrations without Extended Quota Mode. Consequences:
+
+- **Two of three signals are unbuildable on Spotify.** Only artist expansion survives, and only via
+  `artist_albums` → `album_tracks` (which is actually *deeper* than the 10-track `artist_top_tracks` cap
+  it replaces — but note `artist_albums` 400s above `limit=10` on a restricted app).
+- **Playlist co-occurrence and a Spotify mood atlas are both impossible**, because playlists can be
+  *found* but not *read*. Both were probed and both 403.
+- **`audio_features` is gone**, killing the one path that would have made a native Spotify mood signal
+  easier than YouTube's atlas+lyrics+LLM stack. PLAN's v3 note anticipating that is now obsolete.
+- Live consequence: `recommend_from_song` on Spotify returns **0 songs**.
+
+**The general lesson, which is the actual architectural point:** provider discovery endpoints cannot carry
+a provider-agnostic engine. They differ wildly, they get revoked unilaterally, and YouTube Music has no
+official API at all. Anything built on them breaks per-provider — exactly the problem this version exists
+to solve.
+
+### The three-layer split
+
+| Layer | Owns | Swappable? |
+| --- | --- | --- |
+| **Provider** (`ytmusic-mcp`, `spotify-mcp`, …) | identity, library, listening history, playlist writes | yes — this is the only per-service part |
+| **Music graph** (Deezer) | similarity, artist adjacency, mood corpus, tempo | one implementation, service-neutral |
+| **Local** (`store.py`, `recommend.py`, `arc.py`, `label.py`, `judge.py`) | mood vectors, arcs, ranking, feedback, exclusion | already portable |
+
+The provider supplies *whose taste this is*; the graph supplies *what sounds like what*. Recommendation
+quality stops depending on any one service's API politics.
+
+### Why Deezer is the graph (measured, not assumed)
+
+Two candidates were probed live. **ListenBrainz/MusicBrainz was rejected on evidence:**
+
+- MusicBrainz *identity resolution* is excellent — 7/8 test tracks, every Punjabi/Bollywood one at
+  score 100. Worth remembering if a second graph is ever needed.
+- But ListenBrainz's `similar-recordings` returned **empty for all 6 resolved tracks**, including
+  *Blinding Lights*, across every algorithm variant its API accepts. Calls took **12–19s** each, and
+  MusicBrainz 503s under even 1 req/sec. Unusable on a live path; would need their bulk dumps imported
+  offline, which is its own project.
+
+**Deezer wins on every axis that matters here**, and re-com already talks to it (`tempo.py`):
+
+| Capability | Endpoint | Measured |
+| --- | --- | --- |
+| Track identity | `/search?q=artist:"X" track:"Y"` | **6/6**, ~0.9s |
+| Related artists | `/artist/{id}/related` | **6/6** |
+| Artist catalogue | `/artist/{id}/top`, albums | works |
+| Artist radio | `/artist/{id}/radio` | **uneven** — 25 tracks for The Weeknd, **0 for AP Dhillon** |
+| **Playlist search *and read*** | `/search/playlist`, `/playlist/{id}/tracks` | **works** |
+| BPM | already built | 36% coverage |
+
+No API key, no auth, no attribution requirement — the same reasons it was chosen for tempo.
+
+**The related artists are culturally correct, which is the thing that actually matters for this library:**
+AP Dhillon → Diljit Dosanjh, Shubh, Garry Sandhu, Karan Aujla, Amrinder Gill. Sidhu Moose Wala → Prem
+Dhillon, Cheema Y, Karan Aujla. This is the Punjabi/Bollywood catalogue that Deezer's *tempo* index only
+reached 6–16% of — **resolution and adjacency are far better covered than BPM**, so the tempo coverage
+table is not a proxy for graph coverage. Do not conflate them.
+
+**The mood atlas becomes provider-neutral.** Deezer allows exactly what Spotify forbids — searching
+playlists *and reading their tracks* — so `atlas.py`'s core idea (learn track↔mood from playlist
+membership) rebuilds on Deezer for any backend. Probed `'punjabi sad'` and `'bollywood romantic'` and both
+returned readable playlists, i.e. it reaches the catalogue YouTube's English-centric mood playlists
+barely touched (the 4.1% coverage problem `PLAN_V2.md` documents).
+
+### Known costs, stated up front
+
+- **No track-level radio.** Deezer has no `/track/{id}/radio` or `/track/{id}/related` (both probed,
+  `InvalidQueryException`). YouTube's per-track radio is re-com's single strongest signal and it has no
+  Deezer equivalent — similarity becomes **artist-centric**. This is a genuine quality regression on
+  YouTube and must be measured with `scripts/quality_check.py`, not assumed away. Keeping YouTube's
+  native radio as a provider-optional *bonus* signal (see below) is how to avoid paying it there.
+- **Artist radio is uneven**, empty for exactly the kind of artist this library is full of. Treat it as a
+  best-effort fourth signal, never a required one.
+- **The round trip is the new cost.** The graph returns "Diljit Dosanjh — Born to Shine"; the provider
+  needs its own ID to return it, which is ~1 search per candidate. **Resolve lazily** — rank on
+  graph-side metadata, then resolve only the final N (~20–30), parallelised through the
+  `signals.gather_seeds` pool built on 2026-08-23. Resolving a 500-candidate pool eagerly would be
+  absurd. A candidate that fails to resolve on the provider is dropped with a note, same
+  partial-results philosophy as everywhere else.
+- **Matching is fuzzy and will be wrong sometimes.** The bridge is title+artist normalisation —
+  `signals.same_song`/`_song_key` and `tempo.py`'s resolver already do this and should be extracted into
+  one shared module rather than a third copy.
+
+### Design decisions to make before building
+
+- **Signals become capability-gated strategies**, each declaring what it needs, with the engine running
+  whatever is available and ranking on agreement — which is what `_merge_and_score` already does. A
+  provider advertising native radio (YouTube) contributes it; one that can't (Spotify) simply has fewer
+  sources agreeing, rather than returning nothing. Graceful degradation is already the house style.
+- **The store needs a provider dimension.** Today both instances share `~/.recom/store.db` with no
+  provider column, and nothing gates the mood tools by backend — so `recommend_for_mood` on the Spotify
+  instance silently returns **YouTube videoIds**, having sent YouTube ids to Spotify (`400 Invalid base62
+  id` on every seed) and fallen back to atlas candidates. The exclusion guarantee is meaningless there
+  too, since the exclusion set is YouTube-namespaced. **This is a live correctness bug, not a
+  future concern** — fix it first, before any of the above.
+  Options: a `provider` column on track-keyed tables (composite keys; enables one taste profile across
+  services later) versus a DB per provider (trivial, matches v3's "separate server instance" decision,
+  but fragments a user who connects both). Leaning toward the column, since an *app* wants one identity.
+- **Graph-side caching is mandatory.** Deezer resolution is permanent and already cached for tempo;
+  related-artists and playlist membership should live in the same SQLite store on the same principle
+  (cache the negative results too — `tempo.py`'s lesson).
+- **Offline scripts must move onto the Provider interface.** `build_atlas.py`, `label_library.py`,
+  `build_genres.py`, `snapshot_history.py` all still `import ytmusicapi` directly, which is why
+  `history_log` — and therefore the whole implicit-feedback loop added 2026-08-23 — is YouTube-only in
+  practice. Provider-agnostic recommendations need provider-agnostic indexing.
+
+### What is already portable and should not be rebuilt
+
+Worth stating so a future agent doesn't over-scope: the **lyrics + Claude judge** layer works off
+title/artist and is already service-neutral; **artist mood propagation** is pure local computation and was
+the single largest coverage contributor on YouTube (553 of 1,033 labelled songs); the **arc sequencer**,
+**mood vector space**, **fluff cap**, **feedback loop** and **exclusion machinery** never touched a
+provider API. The portable share of the mood engine is much larger than the atlas dependency suggests.
+
 ## v4 — Respect native YouTube Music dislikes
 
 Not started. User-requested (2026-08-19): never recommend a song the user has thumbs-downed on YouTube
