@@ -21,25 +21,38 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+import provider as provider_module
 from provider import ProviderError
 from ytmusic_client import YTMusicClient
 
 # Rebuilding the library exclusion set costs ~20s of API calls (Liked Music
 # plus every playlist), and every tool needs it. It's cached on disk instead;
 # see _library_video_ids for how staleness is bounded.
+# Which backend this server instance talks to. Each provider is a separate
+# MCP server instance/registration (e.g. "re-com" for YouTube Music,
+# "re-com-spotify" for Spotify) rather than a per-call argument -- a single
+# call should stay within one provider, and this keeps that true structurally.
+PROVIDER = provider_module.active()
+
 _DEFAULT_CACHE_PATH = Path.home() / ".recom" / "library_cache.json"
-CACHE_PATH = Path(os.environ.get("RECOM_CACHE_PATH") or _DEFAULT_CACHE_PATH)
+# Scoped per backend. An exclusion set is a set of one provider's ids, and
+# sharing the file between two instances doesn't merely mix them -- it
+# silently voids the guarantee, since no YouTube videoId can ever equal a
+# Spotify track id. See provider.scoped_path.
+CACHE_PATH = Path(
+    os.environ.get("RECOM_CACHE_PATH") or provider_module.scoped_path(_DEFAULT_CACHE_PATH)
+)
 # Seconds a cached exclusion set stays usable. <= 0 disables caching entirely.
 CACHE_TTL = int(os.environ.get("RECOM_CACHE_TTL", 6 * 60 * 60))
 # How many of the most recently liked songs to re-check on every cache hit.
 # ytmusic-mcp/ytmusicapi pages this, so the real count returned is typically ~2x.
 RECENT_LIKES_LIMIT = 100
 
-# Which backend this server instance talks to. Each provider is a separate
-# MCP server instance/registration (e.g. "re-com" for YouTube Music,
-# "re-com-spotify" for Spotify) rather than a per-call argument -- a single
-# call should stay within one provider, and this keeps that true structurally.
-PROVIDER = os.environ.get("RECOM_PROVIDER", "youtube").lower()
+# The v2 mood engine depends on atlas.py's crawl of YouTube's own mood
+# playlists, which no other backend has an equivalent of yet -- Spotify
+# forbids reading other users' playlists outright (measured 403). PLAN.md's
+# v6 section covers the provider-neutral replacement.
+MOOD_PROVIDERS = {"youtube"}
 
 mcp = MCPServer("re-com" if PROVIDER == "youtube" else f"re-com-{PROVIDER}")
 
@@ -55,6 +68,31 @@ def _store():
 
         _store_conn = store.connect()
     return _store_conn
+
+
+def _require_mood_support() -> None:
+    """Refuse mood tools on a backend whose mood index can't exist yet.
+
+    Without this the failure is silent and worse than an error: the mood
+    engine reads seeds and candidates out of the local store, so on a
+    non-YouTube instance it sent YouTube videoIds to the provider (measured:
+    Spotify 400s every one as an invalid base62 id), fell back to atlas
+    candidates, and returned *YouTube* ids as that provider's
+    recommendations -- against an exclusion set in the wrong id namespace,
+    so the novelty guarantee was void too.
+
+    Failing loudly with a reason beats handing back results that look fine
+    and are entirely wrong.
+    """
+    if PROVIDER not in MOOD_PROVIDERS:
+        raise RuntimeError(
+            f"Mood-based recommendation isn't available on the {PROVIDER!r} backend yet. "
+            "It needs a mood index built from that service's own playlists, and only "
+            f"YouTube Music has one so far ({PROVIDER} doesn't expose the playlist data "
+            "it would take to build). Use recommend_from_song, recommend_from_playlist "
+            f"or songs_by_artist on {PROVIDER}, or the 're-com' (YouTube Music) server "
+            "for mood. See PLAN.md's v6 section for the provider-neutral replacement."
+        )
 
 
 def _client() -> Any:
@@ -688,6 +726,7 @@ def recommend_for_mood(
     import recommend
     import store as _s
 
+    _require_mood_support()
     yt = _client()
     conn = _store()
     # Learn from earlier rounds before ranking this one. Local SQL only, and
@@ -757,6 +796,7 @@ def recommend_from_playlist_for_mood(
     import recommend
     import store as _s
 
+    _require_mood_support()
     yt = _client()
     conn = _store()
     _s.infer_implicit_feedback(conn)  # same reasoning as recommend_for_mood
@@ -832,6 +872,7 @@ def read_my_mood() -> dict[str, Any]:
     import moodspace
     import sense
 
+    _require_mood_support()
     read = sense.read_mood(_store(), _client())
     return {
         **read,
@@ -915,6 +956,12 @@ def index_status() -> dict[str, Any]:
     conn = _store()
     _s.infer_implicit_feedback(conn)
     return {
+        # Name the backend and its store: these numbers describe one
+        # provider's index, and an empty one on a fresh backend is a real
+        # answer rather than a bug.
+        "provider": PROVIDER,
+        "store": str(_s.DB_PATH),
+        "mood_supported": PROVIDER in MOOD_PROVIDERS,
         "atlas": _s.atlas_stats(conn),
         "library": label.library_coverage(conn),
         "feedback": _s.feedback_stats(conn),

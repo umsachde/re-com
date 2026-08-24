@@ -20,7 +20,43 @@ existing signal/ranking/mood code path -- and every test covering it --
 completely unchanged.
 """
 
+import os
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+DEFAULT_PROVIDER = "youtube"
+
+
+def active() -> str:
+    """Which backend this process talks to, from RECOM_PROVIDER.
+
+    Lives here rather than in server.py because `store.py` needs it too and
+    must not import the server (which imports the store).
+    """
+    return os.environ.get("RECOM_PROVIDER", DEFAULT_PROVIDER).lower()
+
+
+def scoped_path(base: Path, provider: str | None = None) -> Path:
+    """Give a persistent file its own name per backend.
+
+    Every id re-com stores -- library rows, cached exclusion sets, mood
+    labels -- belongs to exactly one backend's namespace, and they are not
+    interchangeable: a YouTube videoId is 11 chars, a Spotify track id is 22.
+    Sharing one file between two provider instances is silently wrong rather
+    than merely untidy. Measured before this existed: the Spotify instance
+    read a 1,499-entry exclusion set of YouTube videoIds, none of which can
+    ever match a Spotify id -- so the "never recommend something already in
+    your library" guarantee, the whole point of this project, excluded
+    nothing at all.
+
+    The default provider keeps the original unsuffixed filename so existing
+    installs keep their crawled atlas, labels and history rather than waking
+    up to an empty store.
+    """
+    provider = provider or active()
+    if provider == DEFAULT_PROVIDER:
+        return base
+    return base.with_name(f"{base.stem}-{provider}{base.suffix}")
 
 
 class ProviderError(RuntimeError):

@@ -234,15 +234,7 @@ barely touched (the 4.1% coverage problem `PLAN_V2.md` documents).
   whatever is available and ranking on agreement — which is what `_merge_and_score` already does. A
   provider advertising native radio (YouTube) contributes it; one that can't (Spotify) simply has fewer
   sources agreeing, rather than returning nothing. Graceful degradation is already the house style.
-- **The store needs a provider dimension.** Today both instances share `~/.recom/store.db` with no
-  provider column, and nothing gates the mood tools by backend — so `recommend_for_mood` on the Spotify
-  instance silently returns **YouTube videoIds**, having sent YouTube ids to Spotify (`400 Invalid base62
-  id` on every seed) and fallen back to atlas candidates. The exclusion guarantee is meaningless there
-  too, since the exclusion set is YouTube-namespaced. **This is a live correctness bug, not a
-  future concern** — fix it first, before any of the above.
-  Options: a `provider` column on track-keyed tables (composite keys; enables one taste profile across
-  services later) versus a DB per provider (trivial, matches v3's "separate server instance" decision,
-  but fragments a user who connects both). Leaning toward the column, since an *app* wants one identity.
+- ~~**The store needs a provider dimension.**~~ **Fixed 2026-08-23, before anything else** — see below.
 - **Graph-side caching is mandatory.** Deezer resolution is permanent and already cached for tempo;
   related-artists and playlist membership should live in the same SQLite store on the same principle
   (cache the negative results too — `tempo.py`'s lesson).
@@ -258,6 +250,44 @@ title/artist and is already service-neutral; **artist mood propagation** is pure
 the single largest coverage contributor on YouTube (553 of 1,033 labelled songs); the **arc sequencer**,
 **mood vector space**, **fluff cap**, **feedback loop** and **exclusion machinery** never touched a
 provider API. The portable share of the mood engine is much larger than the atlas dependency suggests.
+
+### v6 step 0 (done, 2026-08-23): stop the two backends sharing one namespace
+
+The prerequisite for everything above, and a live correctness bug rather than a design concern.
+
+**What was wrong.** Both `store.DB_PATH` and `server.CACHE_PATH` defaulted to fixed paths with no
+provider dimension, and nothing gated the mood tools by backend. Measured on the real machine:
+
+- The shared `~/.recom/library_cache.json` held **1,499 YouTube videoIds, all 11 characters**. A Spotify
+  track id is 22, so on the Spotify instance the exclusion set could match *nothing* — **the "never
+  recommend something already in your library" guarantee, the entire premise of this project, excluded
+  zero songs.** This was the worse of the two bugs and the less obvious one.
+- `recommend_for_mood` on the Spotify instance didn't fail. It picked seeds from the YouTube-populated
+  store, sent YouTube ids to Spotify (`400 Invalid base62 id` on every one), fell back to
+  `atlas_neighbours`, and returned **YouTube videoIds as Spotify recommendations**.
+
+**The fix, deliberately the small one.** `provider.scoped_path()` gives each backend its own files
+(`store-spotify.db`, `library_cache-spotify.json`); `provider.active()` is the single source of truth for
+`RECOM_PROVIDER`, living in `provider.py` because `store.py` needs it and must not import `server.py`.
+`_require_mood_support()` refuses the three mood tools on a backend with no mood index, *before* touching
+the provider or the store.
+
+- **The default backend keeps its original unsuffixed filenames**, so the existing install keeps its
+  65k-track atlas, 1,449 labelled library rows and history instead of waking up to an empty store. Verified
+  live on both backends after the change: YouTube unchanged and intact, Spotify isolated and empty.
+- **Per-provider files, not a `provider` column.** The column is the better long-term shape for one taste
+  profile across services and this section previously leaned that way — but it means composite keys on
+  ~8 tables and touching every query in `store.py`, `label.py`, `filters.py`, `atlas.py`, which is a large
+  refactor to sit *underneath* an unfixed correctness bug. v6 restructures this storage anyway (the graph
+  data becomes provider-neutral while library/history/feedback stay per-provider), so the cheap correct fix
+  now does not foreclose the column later. Revisit when v6 lands, not before.
+- **Refusing beats degrading here**, which is a deliberate exception to this project's usual
+  partial-results philosophy. Elsewhere a missing signal costs some quality; here it produces results that
+  look normal and are entirely wrong, in the wrong id namespace, against a void exclusion set. There is no
+  useful partial answer to hand back.
+- Tests 355 → 375 (`tests/test_provider_isolation.py`). One trap worth recording: tests that
+  `importlib.reload(store)` overwrite conftest's `DB_PATH` override and would point the suite at the
+  developer's **real** database, so the fixture redirects `HOME` into `tmp_path` first.
 
 ## v4 — Respect native YouTube Music dislikes
 

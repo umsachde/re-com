@@ -226,7 +226,7 @@ local timestamps are the only clock this system will ever have:
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `RECOM_DB_PATH` | `~/.recom/store.db` | Mood index, labels, history, feedback. |
+| `RECOM_DB_PATH` | `~/.recom/store.db` | Mood index, labels, history, feedback. [Scoped per backend](#one-store-per-backend) — Spotify uses `store-spotify.db`. |
 | `RECOM_JUDGE_MODEL` | `claude-opus-5` | Model for lyric-based labelling. |
 | `RECOM_JUDGE_EFFORT` | `low` | Effort level for that labelling. |
 | `RECOM_JUDGE_BATCH` | `12` | Songs per labelling request. |
@@ -308,6 +308,27 @@ dropping them would quietly delete whole languages from the results.
 Build the index with `python scripts/build_tempo.py` (~0.4s/song, cached permanently
 including the misses).
 
+## One store per backend
+
+Every id re-com persists — library rows, cached exclusion sets, mood labels, feedback — belongs to
+exactly one backend's namespace, and they are **not interchangeable**: a YouTube videoId is 11
+characters, a Spotify track id is 22. So each provider instance gets its own files:
+
+| | YouTube Music (default) | Spotify |
+| --- | --- | --- |
+| Store | `~/.recom/store.db` | `~/.recom/store-spotify.db` |
+| Exclusion cache | `~/.recom/library_cache.json` | `~/.recom/library_cache-spotify.json` |
+
+The default backend keeps the original unsuffixed names, so an existing install keeps its crawled atlas,
+labels and history rather than waking up to an empty store. `RECOM_DB_PATH` / `RECOM_CACHE_PATH` still
+override outright if set.
+
+**This is a correctness guarantee, not tidiness.** Sharing one exclusion set between backends doesn't
+merely mix the data — it silently voids the promise this project exists for, because no YouTube videoId
+can ever equal a Spotify track id, so a 1,499-entry exclusion set matches *nothing* and every "new"
+recommendation could already be in your library. Mood tools are refused outright on a backend with no
+mood index rather than returning another provider's ids (see below).
+
 ## Speed
 
 Two costs dominate a recommendation: building the library exclusion set (solved by the
@@ -354,7 +375,7 @@ exclusion set beats no recommendation, the same partial-results philosophy used 
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `RECOM_CACHE_PATH` | `~/.recom/library_cache.json` | Where the cached set lives (~22 KB). |
+| `RECOM_CACHE_PATH` | `~/.recom/library_cache.json` | Where the cached set lives (~22 KB). [Scoped per backend](#one-store-per-backend). |
 | `RECOM_CACHE_TTL` | `21600` (6 hours) | How long a cached set stays usable. **Set to `0` to disable caching** and rebuild on every call. |
 
 The cache is written atomically (temp file + rename), and a missing, unreadable, malformed or expired
@@ -401,7 +422,19 @@ claude mcp add re-com-spotify -s user \
   -- "$(pwd)/.venv/bin/python" "$(pwd)/server.py"
 ```
 
-**What's different from YouTube Music, in practice:** Spotify's Web API has no radio/related-content feed the way YouTube Music does, and Spotify restricts its `/recommendations` and related-artists endpoints for API apps created after November 2024 without Extended Quota Mode. `spotify_client.py` builds the same radio/related/artist-expansion shape out of what Spotify does expose (seed-track recommendations where available, related-artists' top tracks, the seed artist's own top tracks — capped at ~10 by Spotify, thinner than YouTube Music's full catalog playlist); if your app lacks access to a restricted endpoint, that one signal is skipped gracefully rather than failing the recommendation. `recommend_for_mood` and the rest of the v2 mood engine are **YouTube-only for now** — they depend on YouTube's mood-playlist atlas (`atlas.py`, `scripts/build_atlas.py`), which has no Spotify equivalent yet; `recommend_from_song`, `recommend_from_playlist`, `songs_by_artist`, and `refresh_library` work on both backends.
+**What's different from YouTube Music, in practice — and it is severe.** Measured against a real app registration (2026-08-23), Spotify has revoked every discovery endpoint for apps created after November 2024 without Extended Quota Mode:
+
+| Still works | Returns 403/404 |
+| --- | --- |
+| Saved tracks, playlists, recently played, top tracks/artists | `/recommendations` (404) |
+| `search` (tracks, artists, playlists) | `artist_related_artists`, `artist_top_tracks` |
+| `track`, `artist`, `artist_albums` → `album_tracks` | `audio_features`, `audio_analysis` |
+| | Reading **any other user's playlist** |
+| | `categories`, `featured_playlists`, `new_releases` |
+
+**Two of the three discovery signals are therefore unbuildable on Spotify, and `recommend_from_song` currently returns 0 results there.** `spotify_client.py` still degrades gracefully — a forbidden endpoint is skipped rather than failing the call — but graceful degradation of *every* signal is still nothing. Unless your app has Extended Quota Mode, treat the Spotify backend as **not currently usable for recommendations**; see `PLAN.md`'s v6 section for the neutral-music-graph redesign that fixes this properly.
+
+`recommend_for_mood`, `recommend_from_playlist_for_mood` and `read_my_mood` are **YouTube-only and now refuse on other backends with an explanatory error**, rather than silently returning YouTube ids as another service's recommendations (which is what they did before this was enforced). They depend on YouTube's mood-playlist atlas (`atlas.py`, `scripts/build_atlas.py`), and Spotify forbids reading the playlist data an equivalent would need. `recommend_from_song`, `recommend_from_playlist`, `songs_by_artist`, `refresh_library`, `record_feedback`, `explain_recommendation` and `index_status` are available on both backends.
 
 ---
 
@@ -428,7 +461,10 @@ Check coverage with:
 pytest --cov=server --cov-report=term-missing
 ```
 
-355 tests across the whole project. `tests/test_feedback.py` covers implicit feedback (the
+375 tests across the whole project. `tests/test_provider_isolation.py` covers the per-backend split —
+path scoping, the default backend keeping its original filenames (so an existing install isn't orphaned),
+explicit env overrides still winning, and that each mood tool refuses on a foreign backend *before*
+reaching the provider while the v1 tools stay reachable. `tests/test_feedback.py` covers implicit feedback (the
 recommendation/history diff, its idempotence, retraction of a wrong `ignored` verdict, and the guarantee
 that inferred evidence never reaches the hard-exclusion set) and the bounded artist affinity it feeds.
 `tests/test_concurrency.py` covers concurrent seed gathering — that it really is concurrent (proved with

@@ -17,8 +17,12 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+import provider as _provider
+
+# Scoped per backend: every video_id in here belongs to one provider's id
+# namespace and they must never mix. See provider.scoped_path.
 _DEFAULT_DB_PATH = Path.home() / ".recom" / "store.db"
-DB_PATH = Path(os.environ.get("RECOM_DB_PATH") or _DEFAULT_DB_PATH)
+DB_PATH = Path(os.environ.get("RECOM_DB_PATH") or _provider.scoped_path(_DEFAULT_DB_PATH))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS track (
