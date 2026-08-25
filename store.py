@@ -203,9 +203,18 @@ def _artist_names(value: Any) -> str:
     The store sits at the boundary with the raw API, which hands back artists
     as [{"name": ...}] in some responses and already-normalised ["name"] in
     others. Accept both rather than making every caller remember which.
+
+    A plain string is accepted as-is, which is not merely tidiness: strings are
+    iterable, so without this an already-joined credit came back out as
+    "A & P &   & D & h & i & l & l & o & n". Nothing in the live path passes
+    one today, but `library_track_meta` now feeds these values into the
+    exclusion matcher, where a mangled credit would silently stop matching --
+    a wrong answer rather than a visible failure.
     """
     if not value:
         return ""
+    if isinstance(value, str):
+        return value
     names = []
     for entry in value:
         if isinstance(entry, dict):
@@ -466,6 +475,27 @@ def sync_library(conn: sqlite3.Connection, entries: Iterable[tuple[str, str, boo
 
 def library_video_ids(conn: sqlite3.Connection) -> set[str]:
     return {r["video_id"] for r in conn.execute("SELECT DISTINCT video_id FROM library_track")}
+
+
+def library_track_meta(conn: sqlite3.Connection) -> list[tuple[str | None, str | None]]:
+    """(title, artists) for every library track we have metadata for.
+
+    Feeds v6's stage-one exclusion index (`match.build_index`). Graph
+    candidates arrive as title+artist text with no provider id, so they cannot
+    be checked against the id-keyed exclusion set until after they are
+    resolved -- this is what lets them be checked before.
+
+    Only tracks the store actually knows about are returned. That makes this an
+    optimisation rather than the guarantee: the authoritative check is still
+    the id-based one after resolution (`signals.resolve_candidates`), which is
+    what keeps a library with no synced metadata correct rather than merely
+    lucky.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT t.title, t.artists FROM library_track l "
+        "JOIN track t ON t.video_id = l.video_id"
+    ).fetchall()
+    return [(r["title"], r["artists"]) for r in rows]
 
 
 def library_playlists_for(conn: sqlite3.Connection, video_id: str) -> list[str]:

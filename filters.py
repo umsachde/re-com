@@ -59,6 +59,11 @@ def apply_language(
     allow_unlabelled: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Keep only candidates in the requested language(s)."""
+    # A bare string here would be iterated character by character -- see
+    # taxonomy.as_languages. Normalised at this single funnel rather than at
+    # each of the three tools that reach it.
+    want = taxonomy.as_languages(want)
+    exclude = taxonomy.as_languages(exclude)
     if not want and not exclude:
         return candidates, {"applied": False}
 

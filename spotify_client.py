@@ -58,6 +58,7 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 
+import provider
 from provider import ProviderError
 
 _CONNECT_TIMEOUT = 30
@@ -196,6 +197,45 @@ class SpotifyClient:
         self._thread.join(timeout=5)
 
     # --- provider.Provider surface ------------------------------------------
+
+    def capabilities(self) -> set[str]:
+        """None of them, by default -- and that is measured, not pessimism.
+
+        Probed directly against the real app registration (2026-08-23):
+        `/recommendations` 404, `artist_related_artists` 403,
+        `artist_top_tracks` 403, `audio_features` 403, and other users'
+        playlists unreadable. That is the post-Nov-2024 restriction for apps
+        without Extended Quota Mode, and it removes every native discovery
+        signal re-com had here. The live consequence before v6 was
+        `recommend_from_song` returning zero songs.
+
+        Spotify grants Extended Quota Mode by manual approval, so an account
+        that has it can turn the native signals back on with
+        RECOM_SPOTIFY_CAPABILITIES="radio,related,artist" rather than needing a
+        code change. Anything declared here is still attempted defensively --
+        `signals._SIGNAL_ERRORS` skips a signal that 403s regardless of what
+        this returns.
+
+        What Spotify still does well (library, saved tracks, playlists,
+        history, search) is untouched by the restriction, and is exactly the
+        half v6 assigns to the provider. Discovery now comes from the graph.
+        """
+        raw = os.environ.get("RECOM_SPOTIFY_CAPABILITIES", "")
+        declared = {c.strip().lower() for c in raw.split(",") if c.strip()}
+        return declared & set(provider.ALL_CAPABILITIES)
+
+    def get_track_meta(self, video_id: str) -> dict[str, Any] | None:
+        """Title/artist for one track, without paying for a dead radio call.
+
+        `get_watch_playlist` would also return this, but it additionally calls
+        the restricted `/recommendations` endpoint on every seed. With no radio
+        capability there is no reason to pay for that, and the graph needs the
+        seed's title/artist on every single request to resolve it onto Deezer.
+        """
+        try:
+            return _track_from_spotify(self._call("get_track", track_id=video_id)) or None
+        except SpotifyMCPError:
+            return None
 
     def search(self, query: str, filter: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         kind = "artist" if filter == "artists" else "track"

@@ -7,12 +7,18 @@ how to label a whole library.
 
 Priority order, best first:
 
-  llm     Claude read the lyrics. Handles any language, and irony.
-  lyrics  Lyrics were fetched but only mechanically scored.
-  atlas   Playlist membership. Cheap, broad, coarse.
-  artist  Inferred from other songs by the same artist. Free, and it covers
-          the catalogue the atlas misses -- which for this library is most of
-          the Punjabi, Bollywood and Riddim in it.
+  llm         Claude read the lyrics. Handles any language, and irony.
+  lyrics      Lyrics were fetched but only mechanically scored.
+  atlas       Membership in the *provider's own* editorial mood playlists.
+              Cheap, broad, coarse -- and only YouTube Music has one.
+  graph_atlas Membership in Deezer playlists found by mood search
+              (graph_atlas.py). Works on every backend, which is what makes
+              mood portable at all, but ranks below `atlas`: a playlist merely
+              titled "sad songs" was named by a stranger, where a YouTube mood
+              playlist was filed by the service under a taxonomy.
+  artist      Inferred from other songs by the same artist. Free, and it covers
+              the catalogue the atlases miss -- which for this library is most
+              of the Punjabi, Bollywood and Riddim in it.
 
 A better source always wins outright rather than being averaged in: blending a
 confident lyric reading with a one-tag atlas guess makes the good answer worse.
@@ -24,7 +30,7 @@ from typing import Any, Iterable
 import moodspace
 import store
 
-SOURCE_PRIORITY = ("llm", "lyrics", "atlas", "artist")
+SOURCE_PRIORITY = ("llm", "lyrics", "atlas", "graph_atlas", "artist")
 _RANK = {source: index for index, source in enumerate(SOURCE_PRIORITY)}
 
 # Artist propagation is a real signal but a weaker one than direct evidence --

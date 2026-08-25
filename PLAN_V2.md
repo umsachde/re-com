@@ -704,3 +704,69 @@ nothing in the API provides one.
 - **Tempo does not dominate ranking** (`TEMPO_WEIGHT` 0.35): a two-signal candidate at the wrong tempo
   can still outrank a one-signal candidate at exactly the right one. Use `bpm_min`/`bpm_max` when tempo
   is a requirement rather than a preference.
+
+---
+
+## v4 — agentic orchestration layer (proposed, not built)
+
+Everything above — including the mood engine's four-layer fallback and the arc sequencer — is a fixed
+pipeline: given inputs, a predetermined sequence of Python calls runs and returns a result. The tool
+*definitions* are well-designed, but nothing in re-com decides at runtime which tools to call, in what
+order, or replans when an intermediate result is bad. That's the actual gap between "built good MCP
+tools" and "built an agent."
+
+**Proposal: a thin orchestrator agent, built on the Claude Agent SDK, that sits above `re-com`,
+`spotify-mcp`, and `ytmusic-mcp` and drives them the way a person would — not the way `recommend.py`
+does.**
+
+### Why this project, not a new domain
+
+The tool surface already exists and is already well-specified (typed inputs, documented guarantees,
+`notes`/`filters` fields that report degraded results instead of hiding them). That means the new project
+is 100% about the agent loop and context handling, with zero time spent on API wrappers or auth — the
+actual gap, isolated.
+
+### What it should do that the current pipeline can't
+
+- **Open-ended goals, not fixed tool calls.** "Build me a 45-minute playlist for a run that doesn't
+  repeat any artist more than twice and gets more energetic toward the end" is not a single tool call —
+  it requires deciding to call `recommend_for_mood` with `arc="lift"`, checking the result against the
+  artist-repeat constraint itself (no existing tool enforces that), and re-querying with a narrower seed
+  set if it fails.
+- **Replanning on bad intermediate results**, not silent degradation. Right now a failed signal just
+  drops out and a `note` reports it (correct for a fixed pipeline). An agent should be able to *notice*
+  "the mood coverage note says 40% of this batch is `artist`-propagated only" and decide to raise `limit`
+  or pick different seeds, the way `recommend_from_playlist_for_mood`'s bridge_expand fix (Addendum,
+  above) had to be hand-coded as a special case. Generalize that instinct into the loop itself instead of
+  writing a bespoke fallback for every mode that needs it.
+- **State across a multi-step session.** "Now swap out the three least energetic ones" requires
+  remembering what it built, what it rejected, and why — a session memory, not a single stateless tool
+  call.
+- **Explicit context management as the design problem, not an assumed harness feature.** A crawl-scale
+  session (`get_playlist_tracks` on a 1,500-track library, `songs_by_artist` fanned out over a dozen
+  artists) produces tool output far larger than a useful prompt. Claude Code's harness compacts this for
+  you automatically; building it yourself — deciding what to summarize, what to drop, what to keep
+  verbatim (e.g. never truncate the exclusion set, always truncate raw track-metadata dumps) — is the
+  actual mechanism behind "understanding context," not just a byproduct of using a tool that already
+  handles it.
+
+### Concrete v0 scope
+
+1. A single script (`orchestrator.py`, new directory alongside the three existing projects) using the
+   Claude Agent SDK's agent loop, given the same three MCP servers as tools.
+2. One test task with a checkable success condition: "45-minute run playlist, energy rising, no artist
+   more than twice" — checkable in code (sum durations, check the arc, count artist repeats) without
+   human judgment, so the agent's autonomous planning has a pass/fail, not a vibe check.
+3. A deliberately small context budget (e.g. cap tool-result tokens fed back into the loop well below
+   what a naive implementation would use) to force the summarize/trim decision to actually matter, rather
+   than coasting on a context window large enough to hide the problem.
+4. Log the plan the agent actually took (which tools, in what order, what it replanned after) — that log
+   is the deliverable that shows the gap closing, more than the playlist itself.
+
+### Explicitly out of scope for v0
+
+- No new recommendation logic — reuse `re-com`'s tools as-is. This project is about the loop around them,
+  not a v3 recommendation feature.
+- No UI. CLI in, playlist ID + plan log out.
+- No multi-user/session persistence beyond one run. Session memory matters within a run; durable
+  cross-session memory is a different, later problem.

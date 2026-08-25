@@ -15,15 +15,34 @@ import requests
 from ytmusicapi.exceptions import YTMusicError
 
 import store
+from provider import ProviderError
 
-_TRANSIENT = (YTMusicError, requests.exceptions.RequestException)
+# `ProviderError` matters as of v6: scripts/label_library.py now passes a
+# Provider (server._client()) rather than a raw ytmusicapi client, and a
+# provider translates its own failures into ProviderError. Without it here, a
+# transient provider failure would crash the labelling pass instead of leaving
+# one song unlabelled -- which is the whole point of catching these.
+#
+# YTMusicError stays because this module is also called directly by the
+# YouTube-native offline scripts, which still hold a real ytmusicapi client.
+_TRANSIENT = (ProviderError, YTMusicError, requests.exceptions.RequestException)
 
 # Enough to establish mood without paying for a full lyric sheet on every song.
 EXCERPT_CHARS = 900
 
 
 def fetch(yt: Any, video_id: str) -> tuple[str | None, str | None]:
-    """Fetch lyrics for a song. Returns (text, source); (None, None) if absent."""
+    """Fetch lyrics for a song. Returns (text, source); (None, None) if absent.
+
+    A backend with no lyric support at all (Spotify exposes none) is treated
+    exactly like a song with no lyrics: this layer simply doesn't contribute,
+    and `label.py` falls through to the next mood source. Absence of a
+    capability must degrade, not raise.
+    """
+    getter = getattr(yt, "get_lyrics", None)
+    if getter is None:
+        return None, None
+
     try:
         watch = yt.get_watch_playlist(videoId=video_id, limit=1)
     except _TRANSIENT:
@@ -34,7 +53,7 @@ def fetch(yt: Any, video_id: str) -> tuple[str | None, str | None]:
         return None, None
 
     try:
-        result = yt.get_lyrics(browse_id)
+        result = getter(browse_id)
     except _TRANSIENT:
         return None, None
 

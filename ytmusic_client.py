@@ -34,6 +34,7 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 
+import provider
 from provider import ProviderError
 
 _CONNECT_TIMEOUT = 30
@@ -145,6 +146,13 @@ class YTMusicClient:
     # Every method below matches the subset of YTMusic's signature/return
     # shape that the rest of re-com already relies on.
 
+    def capabilities(self) -> set[str]:
+        """All three native signals. YouTube Music has no official API, but
+        what it does expose it exposes fully -- per-track radio (re-com's
+        single strongest signal), a separate related-content feed, and a full
+        artist catalogue via the channel's "Songs" browse id."""
+        return set(provider.ALL_CAPABILITIES)
+
     def search(self, query: str, filter: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         return self._call("search_music", query=query, filter=filter, limit=limit)
 
@@ -162,6 +170,12 @@ class YTMusicClient:
 
     def get_song_related(self, browseId: str) -> list[dict[str, Any]]:
         return self._call("get_song_related", browse_id=browseId)
+
+    def get_lyrics(self, browseId: str) -> dict[str, Any]:
+        # Needed by lyrics.py, which v6 moved onto this seam along with the
+        # rest of scripts/label_library.py. Without it the Claude labelling
+        # pass would hit a raw AttributeError instead of a lyric sheet.
+        return self._call("get_lyrics", unwrap=False, browse_id=browseId)
 
     def get_artist(self, channelId: str) -> dict[str, Any]:
         return self._call("get_artist", unwrap=False, browse_id=channelId)

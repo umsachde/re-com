@@ -26,6 +26,42 @@ from typing import Any, Protocol, runtime_checkable
 
 DEFAULT_PROVIDER = "youtube"
 
+# --- discovery capabilities -------------------------------------------------
+#
+# Which native discovery signals a backend can actually supply. v6 needs this
+# because signal parity across providers turned out to be not merely uneven but
+# *revocable*: measured against the real Spotify app registration (2026-08-23),
+# `/recommendations` 404s, `artist_related_artists` 403s and `artist_top_tracks`
+# 403s under the post-Nov-2024 restriction for apps without Extended Quota
+# Mode. Two of three signals simply do not exist there.
+#
+# Declared up front rather than probed, because this is a property of the app
+# registration, not of any one request -- probing would waste a round-trip per
+# call to learn something knowable in advance.
+#
+# **Declaration decides what to attempt; exceptions still decide what
+# survives.** A declaration can go stale (Spotify could grant Extended Quota
+# Mode; YouTube could break), so `signals._SIGNAL_ERRORS` handling stays in
+# place underneath. Both, not either.
+CAP_RADIO = "radio"          # per-track radio/autoplay queue
+CAP_RELATED = "related"      # per-track "related content" feed
+CAP_ARTIST = "artist"        # artist catalogue + related-artist expansion
+
+ALL_CAPABILITIES = frozenset({CAP_RADIO, CAP_RELATED, CAP_ARTIST})
+
+
+def capabilities_of(backend: Any) -> frozenset[str]:
+    """What this backend says it can do.
+
+    A backend without a `capabilities()` method is assumed to do everything --
+    that is what every provider did before v6, so the default keeps an
+    unmodified or third-party Provider working unchanged.
+    """
+    method = getattr(backend, "capabilities", None)
+    if method is None:
+        return ALL_CAPABILITIES
+    return frozenset(method())
+
 
 def active() -> str:
     """Which backend this process talks to, from RECOM_PROVIDER.
@@ -94,3 +130,23 @@ class Provider(Protocol):
     def get_artist(self, channelId: str) -> dict[str, Any]: ...
 
     def get_history(self) -> list[dict[str, Any]]: ...
+
+    # --- optional ----------------------------------------------------------
+    #
+    # Both of these have working defaults (`capabilities_of` above and
+    # `signals.seed_metadata`), so an existing Provider that implements
+    # neither keeps working exactly as it did.
+
+    def capabilities(self) -> set[str]:
+        """Which of CAP_* this backend can actually supply. Omit to mean all."""
+        ...
+
+    def get_track_meta(self, video_id: str) -> dict[str, Any] | None:
+        """Title/artist for one track, as cheaply as this backend allows.
+
+        v6's graph needs the seed's title and artist to resolve it onto Deezer,
+        and on a backend with no radio capability there is otherwise no cheap
+        way to get them. Omit it and `signals.seed_metadata` falls back to
+        `get_watch_playlist`.
+        """
+        ...

@@ -32,8 +32,8 @@ import atlas  # noqa: E402
 import judge  # noqa: E402
 import label  # noqa: E402
 import lyrics as lyrics_mod  # noqa: E402
+import server  # noqa: E402
 import store  # noqa: E402
-from ytmusicapi import YTMusic  # noqa: E402
 
 
 def main() -> int:
@@ -50,11 +50,9 @@ def main() -> int:
         _report(conn)
         return 0
 
-    auth = os.environ.get("RECOM_AUTH_PATH", "headers_auth.json")
-    if not Path(auth).exists():
-        print(f"error: {auth} not found. Run scripts/setup_auth_from_file.py first.", file=sys.stderr)
-        return 1
-    yt = YTMusic(auth)
+    # The Provider seam, not ytmusicapi: library sync must work on whichever
+    # backend RECOM_PROVIDER selects, or mood stays YouTube-only.
+    yt = server._client()
 
     if not args.skip_sync:
         started = time.time()

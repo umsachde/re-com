@@ -289,6 +289,150 @@ the provider or the store.
   `importlib.reload(store)` overwrite conftest's `DB_PATH` override and would point the suite at the
   developer's **real** database, so the fixture redirects `HOME` into `tmp_path` first.
 
+### v6 built (2026-08-25)
+
+**The headline number, measured live on the real accounts:**
+
+| | before | after |
+| --- | --- | --- |
+| Spotify `recommend_from_song` | **0 songs** | **10 songs**, 3.4s warm |
+| YouTube `recommend_from_song` | 10 songs, 5.0s | 10 songs, 5.8s warm |
+
+Spotify's capabilities resolve to `(none)` — every native discovery signal is gone, exactly as measured
+in 2026-08-23 — and all ten results come from graph signals. YouTube's top ten is unchanged and still
+native-dominated, because multi-signal agreement outranks a single graph source. Tests 375 → 474.
+
+**New modules.** `match.py` (one copy of song identity, replacing the duplicates in `signals.py`/`tempo.py`
+that PLAN.md warned would become three), `graph.py` (Deezer client + adjacency), `graph_store.py`
+(the shared cache), `graph_atlas.py` (the neutral mood corpus).
+
+**Answers to the four design questions this section left open:**
+
+1. **Capabilities are declared, not probed** — `provider.capabilities()`, defaulting to "everything" so an
+   unmodified Provider is unaffected. Probing would waste a round-trip per call to learn something that is
+   a property of the app registration. Declaration decides what is *attempted*; `_SIGNAL_ERRORS` still
+   decides what *survives*, because declarations go stale. `RECOM_SPOTIFY_CAPABILITIES` turns the native
+   signals back on if Extended Quota Mode is ever granted, without a code change.
+2. **The graph cache is a separate, provider-UNscoped `~/.recom/graph.db`** — the deliberate inverse of
+   `store.py`. Deezer ids are service-neutral, so both backends share one cache and resolution is done
+   once. The `provider` column deferred in step 0 is still not needed.
+3. **Lazy resolution needed a correction this document only half-stated.** "Rank on graph metadata, then
+   resolve the final N" is right but incomplete: the exclusion set is keyed by *provider* id, which graph
+   candidates do not have, so naively ordered the never-recommend-a-library-song guarantee silently stops
+   applying to every graph candidate. Exclusion is now **two-stage** — a title/artist index
+   (`match.build_index`, from `store.library_track_meta`) before resolution, then the authoritative id
+   check after. Stage two is the guarantee; stage one is the optimisation, which matters because a
+   library with no synced metadata must still be correct rather than merely lucky.
+4. **The YouTube-native scripts stay on ytmusicapi deliberately.** `label_library.py`,
+   `snapshot_history.py` and `quality_check.py` moved onto `server._client()` — which is what finally
+   makes `history_log`, and therefore the implicit-feedback loop, work on any backend.
+   `build_atlas.py`/`build_genres.py` cannot follow (they parse YouTube's own taxonomy pages) and now say
+   so in their docstrings so a future agent doesn't "fix" them. `scripts/build_graph_atlas.py` is the
+   portable equivalent.
+
+**Two measured findings that contradicted this document's assumptions:**
+
+- **`/artist/{id}/radio` is not empty for AP Dhillon.** This section recorded 0 tracks for that exact
+  artist; re-probed 2026-08-24 it returned 25, and it contributes real results live. It still ships as a
+  best-effort signal kept under its own `kind`, but the pessimistic assumption was wrong.
+
+  Measured across a 9-seed sample (`scripts/quality_check.py --graph`), radio is present for **9/9**
+  artists — including all five South Asian ones. "Uneven, empty for exactly the kind of artist this
+  library is full of" is not what the data says.
+
+- **Graph coverage is emphatically not BPM coverage, and now there are numbers for it.** This section
+  warned against conflating them; measured, the gap is larger than the warning implied:
+
+  | Catalogue | Resolved | With related artists | With artist radio | Mean neighbours |
+  | --- | --- | --- | --- | --- |
+  | Western (4 seeds) | 4/4 (100%) | 4 | 4 | 45.0 |
+  | South Asian (5 seeds) | 5/5 (100%) | 5 | 5 | **48.4** |
+
+  Deezer's *tempo* index reaches 6–16% of the Punjabi/Bollywood catalogue. Its *identity and adjacency*
+  reach all of this sample, and yield slightly **more** neighbours there than for the Western seeds. Small
+  sample (9 seeds), so this is a sanity check rather than a coverage census — but it is the right
+  direction and it validates choosing Deezer as the graph.
+
+  **At library scale it holds up.** On a random 120-track sample of the real liked library, Deezer
+  resolved **84.2%** (101/120) against a tempo index that reaches 36% of the same catalogue. The two
+  numbers are measuring different things and this is how differently.
+
+### Graph atlas, measured
+
+Full crawl: **231 queries → 1,215 playlists → 71,556 memberships (40,318 distinct tracks) in 14 minutes**,
+comparable to the YouTube atlas's ~35 minutes. All 40,318 carry a materialised mood vector.
+
+On the same 120-track library sample:
+
+| | coverage |
+| --- | --- |
+| Existing labels (native `atlas` + `artist`) | 88/120 (73%) |
+| Graph resolution | 101/120 (84.2%) |
+| **Graph-atlas mood** | **30/120 (25.0%)** |
+
+25% is below the native atlas's 40% on *this* library, which is the expected and correct ordering — it is
+why `graph_atlas` ranks below `atlas` in `label.SOURCE_PRIORITY`. The number that matters is that it is
+25% on a backend that previously had **no mood coverage at all**, and it needs no editorial taxonomy to
+get there.
+
+**One measurement attempt that did not work, recorded so it isn't repeated.** Isolating the
+Punjabi/Bollywood subset by running `taxonomy.script_language` over the sample's titles found zero — YouTube
+titles for that catalogue are romanised ("Brown Munde", not "ਬ੍ਰਾਊਨ ਮੁੰਡੇ"), so script detection cannot see
+it. The per-catalogue split needs the `genre_membership`/language labels instead. The claim that the
+neutral atlas closes the non-English gap is therefore **supported by the crawl** (`punjabi sad` and
+`bollywood sad songs` return readable playlists, and materialised moods include Channa Mereya, Bulleya and
+Enna Sona correctly read as sad) but **not yet by a coverage number**. Do not cite one until it is measured.
+
+**A resume-point bug in this crawler, found by its own output.** The first full run reported
+`queries_crawled 167` against `queries_total 231`: the resume point was inferred from the playlists a query
+produced, so a query that legitimately found nothing was never checked off and would be re-run forever.
+Now recorded in `graph_fetch` like every other "asked, nothing there" result — the same distinction that
+table already existed to make everywhere else.
+- **Eager resolution was a 3.7x latency regression on YouTube.** First live measurement: 5.0s → 18.5s for
+  an *identical* top ten, because every graph candidate in the pool paid for a provider search while
+  native candidates filled the whole response. `resolve_candidates` now walks the pool in rank order and
+  stops once `limit` survivors exist, so a fully-native response does zero searches. 18.5s → 6.2s cold,
+  5.8s warm.
+
+**Two bugs found while building, both pre-existing:**
+
+- **Six tests were silently making real network calls** to api.deezer.com once the graph was wired in.
+  They passed, which is why it went unnoticed. `tests/conftest.py` now has an autouse `no_network`
+  fixture that fails any test opening a socket — both test modules claimed "no network" in their
+  docstrings and the claim had quietly become false.
+- **`store._artist_names` split an already-joined credit into characters** ("AP Dhillon" →
+  `"A & P &   & D & h & i & l & l & o & n"`), because strings are iterable. Not reachable on the live
+  path today, but `library_track_meta` now feeds these values into the exclusion matcher where a mangled
+  credit fails silently rather than loudly.
+- **A bare `language="english"` became a filter for `e, n, g, l, i, s, h`.** The tools declare
+  `list[str]` and strings are iterable, so passing one — an easy mistake for the LLM that calls these —
+  produced a filter matching nothing while reporting itself as applied:
+  `Language filter (e, n, g, l, i, s, h): kept 0`. A nonsense filter that looks like a working one is
+  precisely the failure mode this project keeps guarding against, so `taxonomy.as_languages` now reads a
+  single string as what it obviously means. Same underlying shape as the `_artist_names` bug: three
+  separate places assumed "iterable of names" and got handed a name.
+- Also fixed in passing: `match.artist_matches` no longer treats an empty candidate credit as matching
+  everything (`"" in b` is always True), which on the tempo path let a nameless Deezer hit pass the
+  artist gate and attach another song's BPM.
+
+**One cost this version deliberately bounds rather than pays.** The language/tempo path asks for a
+candidate pool 12x the requested limit, because those filters drop a great deal. That is free when
+candidates are free, but every graph candidate in that pool costs a provider search — so
+`resolve_candidates` takes a `max_resolve` budget: native candidates still fill the deep pool, only the
+searching is bounded. Graph candidates past the budget drop out and are reported in the notes.
+
+**A breakage the migration caused, and the fix.** Moving `label_library.py` onto `server._client()` broke
+its `--claude` lyric pass: `lyrics.fetch` calls `yt.get_lyrics()`, which `ytmusicapi.YTMusic` has and the
+`Provider` interface did not. `ytmusic-mcp` gained a `get_lyrics` tool (32 tests there now, up from 30) and
+`YTMusicClient` exposes it — the same pattern v3 used when it added `get_watch_playlist`/`get_song_related`/
+`get_artist` there. `lyrics.py` additionally now returns "no lyrics" rather than raising on a backend with
+no lyric support at all (Spotify), and its `_TRANSIENT` tuple gained `ProviderError`, without which a
+transient provider failure would have crashed a labelling run instead of costing one song.
+
+**Still open.** `_require_mood_support()` still refuses mood tools on Spotify. The graph atlas makes them
+*possible* there, but per this section's own rule that refusing beats degrading, it should be relaxed only
+once graph-atlas coverage on a Spotify library is measured — not on the assumption that it works.
+
 ## v4 — Respect native YouTube Music dislikes
 
 Not started. User-requested (2026-08-19): never recommend a song the user has thumbs-downed on YouTube
