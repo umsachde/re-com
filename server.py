@@ -21,6 +21,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+import match
 import provider as provider_module
 from provider import ProviderError
 from ytmusic_client import YTMusicClient
@@ -58,6 +59,11 @@ mcp = MCPServer("re-com" if PROVIDER == "youtube" else f"re-com-{PROVIDER}")
 
 _yt: Any = None
 _store_conn = None
+_graph_conn_cache = None
+
+# The music graph can be turned off per instance -- useful to isolate a
+# regression, or to run a backend on native signals alone.
+GRAPH_ENABLED = os.environ.get("RECOM_GRAPH", "1").strip().lower() not in {"0", "false", "no"}
 
 
 def _store():
@@ -68,6 +74,34 @@ def _store():
 
         _store_conn = store.connect()
     return _store_conn
+
+
+def _graph():
+    """Lazily open the shared music-graph cache, or None if disabled.
+
+    Unlike `_store()` this file is deliberately NOT per-provider: Deezer ids
+    are service-neutral, so every backend shares one cache and resolution work
+    is done once. See graph_store.py.
+    """
+    global _graph_conn_cache
+    if not GRAPH_ENABLED:
+        return None
+    if _graph_conn_cache is None:
+        import graph_store
+
+        _graph_conn_cache = graph_store.connect()
+    return _graph_conn_cache
+
+
+def _library_exclusion_index():
+    """Title/artist index of the library, for excluding graph candidates that
+    have no provider id yet. Empty is safe -- see store.library_track_meta."""
+    try:
+        import store
+
+        return match.build_index(store.library_track_meta(_store()))
+    except Exception:  # noqa: BLE001 - an unavailable optimisation, never fatal
+        return {}
 
 
 def _require_mood_support() -> None:
@@ -159,6 +193,8 @@ from signals import (  # noqa: E402
     _merge_and_score,
     _norm_track,
     gather_seeds,
+    resolve_candidates,
+    resolve_pool_size,
     same_song,
 )
 
@@ -498,13 +534,27 @@ def recommend_from_song(
             raise RuntimeError(f"No song found matching {desc}.")
 
     seed_artist_names: list[str] = []
-    candidates = _gather_seed_candidates(yt, video_id, seed_artist_names)
+    graph_conn = _graph()
+    seed_meta = {"title": song, "artists": [artist] if artist else []} if song else None
+    candidates = _gather_seed_candidates(
+        yt, video_id, seed_artist_names, graph_conn=graph_conn, seed_meta=seed_meta
+    )
     merged = _merge_and_score([candidates])
     if same_artist_only:
         merged = _filter_same_artist(merged, seed_artist_names or ([artist] if artist else []))
 
     exclude = _library_video_ids(yt)
-    ranked, variants_collapsed = _finalize(merged, exclude, limit * 12 if (language or exclude_languages or bpm or bpm_min or bpm_max or match_seed_tempo) else limit)
+    filtering = bool(language or exclude_languages or bpm or bpm_min or bpm_max or match_seed_tempo)
+    pool = limit * 12 if filtering else resolve_pool_size(limit)
+    ranked, variants_collapsed = _finalize(
+        merged, exclude, pool, exclude_index=_library_exclusion_index() if graph_conn else None
+    )
+    # The filter path wants a 12x pool because language/tempo filters drop a
+    # lot, but graph candidates cost a provider search each -- so the pool stays
+    # deep for native candidates while the searching stays bounded.
+    ranked, unresolved = resolve_candidates(
+        yt, ranked, pool, exclude, max_resolve=resolve_pool_size(limit)
+    )
 
     result = _apply_result_filters(
         ranked, seed_video_id=video_id, seed_title=song, seed_artist=artist,
@@ -516,6 +566,11 @@ def recommend_from_song(
     if variants_collapsed:
         result["notes"].insert(
             0, f"Collapsed {variants_collapsed} remix/feature variant(s) down to one per song."
+        )
+    if unresolved:
+        result["notes"].append(
+            f"Dropped {unresolved} music-graph candidate(s) that couldn't be matched to a "
+            f"song on {PROVIDER} (or turned out to be in your library after matching)."
         )
     return result
 
@@ -546,11 +601,22 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     # skip_failures=False keeps this tool's existing contract: a seed that
     # fails here surfaces as a clear error via handle_errors rather than
     # quietly shrinking the candidate pool.
-    per_seed = gather_seeds(yt, [t["videoId"] for t in sample], skip_failures=False)
+    graph_conn = _graph()
+    per_seed = gather_seeds(
+        yt,
+        [t["videoId"] for t in sample],
+        skip_failures=False,
+        graph_conn=graph_conn,
+        seed_meta={t["videoId"]: _norm_track(t) for t in sample},
+    )
     merged = _merge_and_score(per_seed)
 
     exclude = _library_video_ids(yt) | {t["videoId"] for t in tracks}
-    songs, _ = _finalize(merged, exclude, limit)
+    pool = resolve_pool_size(limit)
+    songs, _ = _finalize(
+        merged, exclude, pool, exclude_index=_library_exclusion_index() if graph_conn else None
+    )
+    songs, _unresolved = resolve_candidates(yt, songs, limit, exclude)
     return songs
 
 
@@ -965,12 +1031,43 @@ def index_status() -> dict[str, Any]:
         "atlas": _s.atlas_stats(conn),
         "library": label.library_coverage(conn),
         "feedback": _s.feedback_stats(conn),
+        "graph": _graph_status(),
         "llm_labelling": {
             "available": judge.available(),
             "model": judge.MODEL,
             "hint": None if judge.available() else "Install with: pip install -e '.[llm]' and run 'ant auth login'.",
         },
     }
+
+
+def _graph_status() -> dict[str, Any]:
+    """What the music graph holds, for index_status.
+
+    Reported alongside the mood index for the same reason that exists: on a
+    backend whose native signals are gone, the graph is where every
+    recommendation now comes from, so an empty graph is the difference between
+    good results and none. Its capabilities are named too, because "this
+    backend supplies no native signals" is the single most useful thing to
+    know when results look thin.
+    """
+    if not GRAPH_ENABLED:
+        return {"enabled": False}
+
+    import graph_atlas
+    import graph_store
+
+    try:
+        conn = _graph()
+        caps = sorted(provider_module.capabilities_of(_client()))
+        return {
+            "enabled": True,
+            "path": str(graph_store.DB_PATH),
+            "native_signals": caps or None,
+            "cache": graph_store.stats(conn),
+            "atlas": graph_atlas.coverage(conn),
+        }
+    except Exception as e:  # noqa: BLE001 - a status report must never fail the call
+        return {"enabled": True, "error": f"{type(e).__name__}: {e}"}
 
 
 if __name__ == "__main__":

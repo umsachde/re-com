@@ -7,6 +7,7 @@ pages are replayed from a captured response shape.
 import pytest
 
 import filters
+import graph
 import store
 import taxonomy
 import tempo
@@ -47,7 +48,13 @@ def test_in_range(bpm, low, high, expected):
 
 
 class _FakeDeezer:
-    """Stands in for tempo._get."""
+    """Stands in for graph._get.
+
+    The Deezer transport moved from tempo.py to graph.py in v6 -- Deezer became
+    the music graph rather than only a tempo source, so one HTTP client serves
+    both. These tests still fake the same boundary; it just lives one module
+    over now.
+    """
 
     def __init__(self, results=None, tracks=None, fail=False):
         self.results = results if results is not None else []
@@ -66,7 +73,7 @@ class _FakeDeezer:
 
 
 def _wire(monkeypatch, fake):
-    monkeypatch.setattr(tempo, "_get", fake)
+    monkeypatch.setattr(graph, "_get", fake)
     return fake
 
 
@@ -421,17 +428,39 @@ def test_lookup_falls_back_to_a_title_only_search(monkeypatch):
                 return {"data": [{"id": 1, "title": "Trumpets", "artist": {"name": "Sak Noel"}}]}
             return {1: {"bpm": 164.06}}[int(url.rsplit("/", 1)[-1])]
 
-    monkeypatch.setattr(tempo, "_get", _ByQuery())
+    _wire(monkeypatch, _ByQuery())
     bpm, status, _ = tempo.lookup("Trumpets", "Billboard Top 100 Hits", sleep=lambda _s: None)
     assert (bpm, status) == (164.06, tempo.STATUS_OK)
 
 
 def test_title_only_fallback_will_not_attach_another_songs_tempo(monkeypatch):
-    monkeypatch.setattr(tempo, "_get", _FakeDeezer(
+    _wire(monkeypatch, _FakeDeezer(
         results=[{"id": 1, "title": "A Completely Different Song", "artist": {"name": "Someone"}}],
         tracks={1: {"bpm": 140.0}},
     ))
     assert tempo.lookup("Jaane Kyon Log Pyar", "Udit Narayan", sleep=lambda _s: None)[1] == tempo.STATUS_NO_MATCH
+
+
+def test_a_bare_language_string_is_read_as_one_language(db):
+    """`language="english"` must not become a filter for e, n, g, l, i, s, h.
+
+    The tools declare list[str], but they're called by an LLM and a bare string
+    is an easy mistake. Iterating it silently produced a filter that matched
+    nothing while reporting itself as applied -- a nonsense filter that looks
+    like a working one.
+    """
+    assert taxonomy.as_languages("english") == ["english"]
+    assert taxonomy.as_languages(["english"]) == ["english"]
+    assert taxonomy.as_languages(None) is None
+    assert taxonomy.as_languages("") is None
+    assert taxonomy.as_languages([]) is None
+
+    candidates = [{"videoId": "v1", "title": "Song", "artists": ["Kendrick Lamar"]}]
+    _, report = filters.apply_language(db, candidates, want="english")
+    assert report["want"] == ["english"], "a bare string must not be split into characters"
+
+    _, excl_report = filters.apply_language(db, candidates, exclude="punjabi")
+    assert excl_report["exclude"] == ["punjabi"]
 
 
 def test_title_match_ignores_bracketed_qualifiers():

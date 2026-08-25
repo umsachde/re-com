@@ -21,95 +21,65 @@ Two consequences shape the design:
     sensibility but not a BPM; propagating it would invent data.
 """
 
-import json
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from typing import Any, Iterable
 
+import graph
+import match
 import store
 
-API = "https://api.deezer.com"
-USER_AGENT = "re-com/0.2 (+https://github.com/umsachde/re-com)"
-
-# Deezer permits roughly 50 requests per 5 seconds. Stay well under it.
-THROTTLE = 0.12
-TIMEOUT = 15
-
-# How many search hits to inspect before giving up on finding a tempo.
-MAX_CANDIDATES = 4
+# The Deezer HTTP client, throttle and search now live in graph.py -- v6 made
+# Deezer re-com's music graph rather than just a tempo source, and two modules
+# holding two copies of the same client would have been the third copy of this
+# plumbing. Re-exported here because callers and tests already reference them.
+API = graph.API
+THROTTLE = graph.THROTTLE
+MAX_CANDIDATES = graph.MAX_CANDIDATES
 
 STATUS_OK = "ok"
 STATUS_NO_BPM = "no_bpm"      # matched the song; Deezer has no tempo for it
 STATUS_NO_MATCH = "no_match"  # nothing on Deezer resembling this song
 
-
-def _get(url: str) -> Any:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        return json.load(response)
-
-
-def _artist_matches(candidate: str, wanted: str) -> bool:
-    """Loose credit match -- Deezer and YouTube format features differently."""
-    if not wanted:
-        return True
-    a, b = candidate.lower(), wanted.lower()
-    return a in b or b in a
+# Credit/title matching lives in match.py -- shared with signals.py and, from
+# v6, with the music graph, which compares Deezer credits against provider
+# credits in exactly the same way. `_same_title` used to `import signals`
+# inside the function body to dodge a circular import -- a low-level module
+# reaching up into a higher-level one. match.py depends on nothing.
+_artist_matches = match.artist_matches
+_same_title = match.same_title
 
 
 def lookup(title: str, artist: str | None = None, sleep=time.sleep) -> tuple[float | None, str, int | None]:
-    """Find a tempo for one song. Returns (bpm, status, deezer_id)."""
+    """Find a tempo for one song. Returns (bpm, status, deezer_id).
+
+    Searching and credit-matching are `graph.search_tracks`; this adds the
+    part that is specific to tempo -- scanning the matched hits for a track
+    that actually carries a BPM, because Deezer often has the right song and
+    no tempo for it (`bpm: 0`), which is a different outcome from not having
+    the song at all.
+    """
     if not title:
         return None, STATUS_NO_MATCH, None
 
-    hits = _search(f"{title} {artist}".strip(), sleep) if artist else []
-    matching = [h for h in hits if _artist_matches((h.get("artist") or {}).get("name", ""), artist)]
-
-    if not matching:
-        # The artist gate is too strict for real YouTube credits -- compilation
-        # uploads ("Billboard Top 100 Hits") and odd separators ("Shankar
-        # Mahadevan | Alyssa Men") match nothing on Deezer, which reported 318
-        # library songs as unmatched when most were simply findable by title.
-        # Fall back to a title-only search, guarded by a title equality check so
-        # this can't quietly attach some other song's tempo.
-        for hit in _search(title, sleep):
-            if _same_title(hit.get("title"), title):
-                matching.append(hit)
-
-    if not matching and not hits:
+    rows = graph.search_tracks(title, artist, sleep=sleep)
+    if not rows:
         return None, STATUS_NO_MATCH, None
 
-    first_id = (matching[0] if matching else hits[0]).get("id")
+    matching = [r for r in rows if r.get("matched")]
+
+    # An unmatched hit is still the best guess at which Deezer record this is,
+    # and is recorded alongside the no-match status rather than discarded.
+    first_id = (matching[0] if matching else rows[0]).get("id")
+
     for hit in matching:
-        sleep(THROTTLE)
-        try:
-            detail = _get(f"{API}/track/{hit['id']}")
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        detail = graph.track_detail(hit["id"], sleep=sleep)
+        if detail is None:
             continue
         bpm = detail.get("bpm")
         if bpm:
             return float(bpm), STATUS_OK, hit["id"]
 
     return None, (STATUS_NO_BPM if matching else STATUS_NO_MATCH), first_id
-
-
-def _search(query: str, sleep) -> list[dict[str, Any]]:
-    if not query.strip():
-        return []
-    encoded = urllib.parse.quote(query.strip()[:180])
-    try:
-        return (_get(f"{API}/search?q={encoded}&limit={MAX_CANDIDATES}") or {}).get("data") or []
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
-        return []
-
-
-def _same_title(candidate: str | None, wanted: str | None) -> bool:
-    """Guard for the title-only fallback: normalised titles must actually match."""
-    import signals
-
-    return bool(candidate and wanted and signals._song_key(candidate) == signals._song_key(wanted))
 
 
 def get_or_fetch(conn: Any, video_id: str, title: str, artist: str | None, sleep=time.sleep) -> float | None:
