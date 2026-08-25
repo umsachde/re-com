@@ -8,6 +8,11 @@ loses the genre in flight.
     python scripts/build_genres.py
     python scripts/build_genres.py --playlists 25   # deeper, slower
     python scripts/build_genres.py --status
+
+**Deliberately still on ytmusicapi**, for the same reason as build_atlas.py:
+it parses YouTube's genre-category browse responses, which exist nowhere else.
+Not an oversight in v6's migration of the other offline scripts -- do not
+"fix" it onto the Provider seam.
 """
 
 import argparse

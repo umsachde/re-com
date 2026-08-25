@@ -17,19 +17,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import sense  # noqa: E402
+import server  # noqa: E402
 import store  # noqa: E402
-from ytmusicapi import YTMusic  # noqa: E402
 
 
 def main() -> int:
-    auth = os.environ.get("RECOM_AUTH_PATH", "headers_auth.json")
-    if not Path(auth).exists():
-        print(f"error: {auth} not found. Run scripts/setup_auth_from_file.py first.", file=sys.stderr)
-        return 1
-
+    # Goes through the Provider seam rather than ytmusicapi directly, so the
+    # history log -- and therefore the whole implicit-feedback loop that reads
+    # it -- works on whichever backend RECOM_PROVIDER selects. This script was
+    # the reason that loop was YouTube-only in practice.
     conn = store.connect()
     try:
-        recorded = sense.snapshot(conn, YTMusic(auth))
+        recorded = sense.snapshot(conn, server._client())
     except Exception as e:  # noqa: BLE001 - a cron job must fail loudly, not silently
         print(f"error: history snapshot failed: {type(e).__name__}: {e}", file=sys.stderr)
         return 1

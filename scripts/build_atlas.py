@@ -7,6 +7,16 @@ playlists that failed. Expect ~35 minutes for a cold full crawl.
     python scripts/build_atlas.py            # full crawl, then materialize
     python scripts/build_atlas.py --limit 40 # short trial run
     python scripts/build_atlas.py --status   # report progress, crawl nothing
+
+**Deliberately still on ytmusicapi, unlike the other offline scripts.** v6
+moved `label_library.py`, `snapshot_history.py` and `quality_check.py` onto the
+Provider seam so they work on any backend. This one cannot follow, and should
+not be "fixed" to: it crawls YouTube Music's own editorial "Moods & moments"
+taxonomy, which no other service has. It stays as the richer YouTube-native
+mood source, ranked above the neutral one in `label.SOURCE_PRIORITY`.
+
+The portable equivalent is `scripts/build_graph_atlas.py`, which builds the
+same kind of evidence from Deezer for every backend.
 """
 
 import argparse

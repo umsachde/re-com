@@ -33,7 +33,7 @@ import label as label_mod  # noqa: E402
 import moodspace  # noqa: E402
 import recommend  # noqa: E402
 import store  # noqa: E402
-from ytmusicapi import YTMusic  # noqa: E402
+import server  # noqa: E402
 
 CASES = [
     ("heartbroken and low", None, "mirror"),
@@ -45,6 +45,66 @@ CASES = [
     ("nostalgic", None, "mirror"),
     (None, "Party", "mirror"),
 ]
+
+
+# Seeds for the v6 graph measurement, deliberately split by catalogue. The
+# Punjabi/Bollywood half is the part every English-centric source under-serves,
+# and the part PLAN.md warns must never be read off the BPM coverage number --
+# those tracks resolve to the right Deezer record and simply carry `bpm: 0`, so
+# 36% tempo coverage says nothing about graph coverage.
+GRAPH_SEEDS_WESTERN = [
+    ("Blinding Lights", "The Weeknd"),
+    ("Kryptonite", "3 Doors Down"),
+    ("As It Was", "Harry Styles"),
+    ("Bad Guy", "Billie Eilish"),
+]
+GRAPH_SEEDS_SOUTH_ASIAN = [
+    ("Excuses", "AP Dhillon"),
+    ("Brown Munde", "AP Dhillon"),
+    ("295", "Sidhu Moose Wala"),
+    ("Channa Mereya", "Arijit Singh"),
+    ("Kesariya", "Arijit Singh"),
+]
+
+
+def measure_graph(graph_conn, limit: int = 10) -> dict:
+    """v6: does the neutral graph actually cover this library's catalogue?
+
+    Reports resolution and adjacency separately per catalogue, because the
+    whole premise of choosing Deezer was that it covers the Punjabi/Bollywood
+    material well even though it has little *tempo* data for it.
+    """
+    import graph
+
+    out = {}
+    for name, seeds in (
+        ("western", GRAPH_SEEDS_WESTERN),
+        ("south_asian", GRAPH_SEEDS_SOUTH_ASIAN),
+    ):
+        resolved = related = radio = neighbours = 0
+        for title, artist in seeds:
+            seed = graph.resolve(graph_conn, title, artist)
+            if not seed:
+                continue
+            resolved += 1
+            if graph.related_artists(graph_conn, seed["artist_id"]):
+                related += 1
+            if graph.artist_tracks(graph_conn, seed["artist_id"], graph.KIND_RADIO):
+                radio += 1
+            neighbours += len(graph.neighbours(graph_conn, seed, per_artist=limit))
+        n = len(seeds)
+        out[name] = {
+            "seeds": n,
+            "resolved": resolved,
+            "resolved_pct": round(100 * resolved / n, 1),
+            "with_related_artists": related,
+            # PLAN.md recorded /artist/{id}/radio as empty for AP Dhillon; a
+            # 2026-08-24 re-probe returned 25 tracks for that same artist.
+            # This column is what settles it.
+            "with_artist_radio": radio,
+            "mean_neighbours": round(neighbours / max(resolved, 1), 1),
+        }
+    return out
 
 
 def measure(yt, conn, limit: int = 10) -> dict:
@@ -97,22 +157,41 @@ def main() -> int:
     parser.add_argument("--distinctiveness", type=float, default=None,
                         help="override moodspace.DISTINCTIVENESS_WEIGHT (0 disables it) to A/B the seed scoring")
     parser.add_argument("--titles", action="store_true", help="print every pick")
+    parser.add_argument("--graph", action="store_true",
+                        help="measure music-graph coverage only (needs no mood index, works on any backend)")
     args = parser.parse_args()
 
-    auth = os.environ.get("RECOM_AUTH_PATH", "headers_auth.json")
-    if not Path(auth).exists():
-        print(f"error: {auth} not found. Run scripts/setup_auth_from_file.py first.", file=sys.stderr)
-        return 1
-
+    # No auth check here any more: the sibling *-mcp server owns credentials
+    # and reports a clear, actionable error itself if they're missing.
     if args.distinctiveness is not None:
         moodspace.DISTINCTIVENESS_WEIGHT = args.distinctiveness
+
+    if args.graph:
+        import graph_atlas
+        import graph_store
+
+        graph_conn = graph_store.connect()
+        print(f"=== music graph ({server.PROVIDER}) ===")
+        for catalogue, row in measure_graph(graph_conn, limit=args.limit).items():
+            print(
+                f"  {catalogue:<12} resolved {row['resolved']}/{row['seeds']} "
+                f"({row['resolved_pct']}%)  related={row['with_related_artists']}  "
+                f"radio={row['with_artist_radio']}  mean_neighbours={row['mean_neighbours']}"
+            )
+        print("\n  graph cache:")
+        for key, value in graph_store.stats(graph_conn).items():
+            print(f"    {key:<22} {value:,}")
+        print("\n  graph atlas:")
+        for key, value in graph_atlas.coverage(graph_conn).items():
+            print(f"    {key:<22} {value:,}")
+        return 0
 
     conn = store.connect()
     if not store.library_video_ids(conn):
         print("error: no library recorded. Run scripts/label_library.py first.", file=sys.stderr)
         return 1
 
-    result = measure(YTMusic(auth), conn, limit=args.limit)
+    result = measure(server._client(), conn, limit=args.limit)
     result["label"] = args.label
 
     cov = result["library_coverage"]
