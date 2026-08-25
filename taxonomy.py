@@ -313,6 +313,27 @@ def artist_languages(conn: Any) -> dict[str, str]:
     return {artist: max(tally, key=tally.get) for artist, tally in votes.items() if tally}
 
 
+def as_languages(value: Any) -> list[str] | None:
+    """Normalise a language argument to a list.
+
+    The tools take `list[str]`, but they're called by an LLM, and a bare
+    `language="english"` is an easy mistake to make. Strings are iterable, so
+    without this it silently becomes a filter for the languages "e", "n", "g",
+    "l", "i", "s", "h" -- which matches nothing and reports itself as
+    `Language filter (e, n, g, l, i, s, h): kept 0`.
+
+    Producing a nonsense filter that looks like a working one is precisely the
+    failure mode this project keeps guarding against, so a single string is
+    read as what it obviously means.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value] if value.strip() else None
+    out = [str(v) for v in value if str(v).strip()]
+    return out or None
+
+
 def matches(language: str | None, wanted: Iterable[str] | None, exclude: Iterable[str] | None) -> bool | None:
     """Whether a song passes a language filter. None means unknown.
 
