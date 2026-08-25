@@ -2,7 +2,9 @@
 
 An [MCP](https://modelcontextprotocol.io) server that recommends **new** songs — never a song already in your library, meaning never a song already in Liked Music *or in any of your playlists*, not just the one you seeded from.
 
-It's built to do better than a streaming service's built-in radio/autoplay by pooling multiple independent discovery signals (radio, related content, artist catalog expansion) and ranking candidates by how many of them agree, instead of trusting one black-box algorithm.
+It's built to do better than a streaming service's built-in radio/autoplay by pooling multiple independent discovery signals (radio, related content, artist catalog expansion, plus a service-neutral music graph) and ranking candidates by how many of them agree, instead of trusting one black-box algorithm.
+
+**Discovery doesn't depend on any one service's API.** A streaming service can revoke the endpoints a recommender is built on, and Spotify did: for API apps registered after November 2024 without Extended Quota Mode, `/recommendations`, related-artists, artist-top-tracks and audio-features all return 403/404. Two of re-com's three original signals became unbuildable there and `recommend_from_song` returned **zero songs**. So similarity and adjacency now come from a neutral [music graph](#the-music-graph) (Deezer) that belongs to no backend, while the provider supplies only *whose taste this is* — library, history, playlist writes. Native signals are still used wherever they exist and still rank highest; they're just no longer required. See [The music graph](#the-music-graph) and `PLAN.md`'s v6 section.
 
 **Backends: YouTube Music and Spotify.** re-com is a general recommendation engine, not tied to one service — re-com itself holds **no streaming-service credentials of any kind** for either backend. Every call goes through a sibling `*-mcp` server that re-com spawns as an MCP subprocess and that owns auth entirely: [`ytmusic-mcp`](https://github.com/umsachde/ytmusic-mcp) for YouTube Music, [`spotify-mcp`](https://github.com/umsachde/spotify-mcp) for Spotify. Which one a given re-com instance talks to is set once, at process start, via `RECOM_PROVIDER` — see [Setup](#2-connect-to-a-backend) below. Both are registered as separate MCP server instances (e.g. `re-com` and `re-com-spotify`); a single tool call always stays within one provider. See `provider.py` and `PLAN.md`'s "v3 — Multi-provider support" section for the design.
 
@@ -79,13 +81,15 @@ cheapest first, and the best available source for a song wins outright:
 | --- | --- | --- |
 | `llm` | Claude reads the lyrics. Handles any language, and irony. | Optional — `pip install -e ".[llm]"` |
 | `lyrics` | Lyrics fetched and cached (2 API calls/song, incl. the negative result) | — |
-| `atlas` | Membership in YouTube's own mood playlists — 1,592 listings, 65,438 tracks, 104,028 memberships | A crawl |
+| `atlas` | Membership in YouTube's own mood playlists — 1,592 listings, 65,438 tracks, 104,028 memberships | A crawl, YouTube only |
+| `graph_atlas` | Membership in Deezer playlists found by mood search. [Works on any backend](#a-mood-corpus-that-works-on-any-backend) | A crawl |
 | `artist` | An artist's average mood, propagated to their unlabelled songs | Free |
 
 **The atlas alone is not enough, and measurably so.** On this account a 60-playlist sample covered 4.1% of
 the liked library, and the misses concentrate on the Punjabi, Bollywood and Reggae catalogue that
 YouTube's English-centric mood playlists barely touch. Artist propagation is what closes most of that gap
-without any API key; the Claude layer closes the rest.
+without any API key; the Claude layer closes the rest. The `graph_atlas` layer attacks the same gap from
+the other side by searching for that catalogue by name, and unlike `atlas` it exists on every backend.
 
 After a full crawl, measured: **71.3% library coverage** — 553 songs from artist propagation, 480 from
 playlist membership.
@@ -231,6 +235,9 @@ local timestamps are the only clock this system will ever have:
 | `RECOM_JUDGE_EFFORT` | `low` | Effort level for that labelling. |
 | `RECOM_JUDGE_BATCH` | `12` | Songs per labelling request. |
 | `RECOM_SEED_WORKERS` | `6` | How many seeds are gathered concurrently. See [Speed](#speed). |
+| `RECOM_GRAPH` | `1` | Set `0` to disable the [music graph](#the-music-graph) and use native signals only. |
+| `RECOM_GRAPH_DB_PATH` | `~/.recom/graph.db` | The music-graph cache. **Shared by every backend** — not scoped per provider. |
+| `RECOM_SPOTIFY_CAPABILITIES` | *(none)* | Comma-separated `radio,related,artist` to re-enable Spotify's native signals if your app has Extended Quota Mode. |
 
 Everything mood-related is stored in local SQLite. The only thing that ever leaves the machine is,
 optionally, song titles and lyric excerpts sent to the Claude API for labelling.
@@ -308,6 +315,70 @@ dropping them would quietly delete whole languages from the results.
 Build the index with `python scripts/build_tempo.py` (~0.4s/song, cached permanently
 including the misses).
 
+## The music graph
+
+Similarity, artist adjacency and the mood corpus come from [Deezer](https://developers.deezer.com/api)
+— no key, no auth, no attribution — and belong to no backend. This is what makes re-com a
+recommendation *app* rather than a wrapper around one service's algorithm.
+
+| Signal | Source | Available on |
+| --- | --- | --- |
+| `radio` | the provider's per-track radio/autoplay queue | YouTube Music |
+| `related` | the provider's per-track related-content feed | YouTube Music |
+| `artist` | the provider's artist catalogue + related artists | YouTube Music |
+| `graph_artist` | the seed artist's Deezer catalogue | every backend |
+| `graph_radio` | Deezer artist radio | every backend |
+| `graph_related` | adjacent artists' catalogues on Deezer | every backend |
+
+Each backend declares what it can actually supply (`provider.capabilities()`), the engine runs whatever
+is available, and ranking is unchanged: **a candidate scores by how many distinct signals agree on it.**
+A backend with fewer native signals simply has fewer sources agreeing rather than returning nothing.
+Measured live: Spotify went from 0 songs to 10; YouTube's top ten is unchanged and still native-dominated.
+
+If Spotify ever grants your app Extended Quota Mode, set
+`RECOM_SPOTIFY_CAPABILITIES="radio,related,artist"` to turn the native signals back on. Set `RECOM_GRAPH=0`
+to disable the graph entirely and run on native signals alone.
+
+**Known costs, stated plainly.** Deezer has no track-level radio (`/track/{id}/radio` doesn't exist), so
+graph similarity is **artist-centric** — genuinely weaker than YouTube's per-track radio, which is why
+native signals are added to rather than replaced. And the graph returns *"Diljit Dosanjh — Born to
+Shine"*, not an id your backend understands, so candidates are matched back to the provider by search.
+That resolution is **lazy**: results are ranked on graph metadata first and only the top of the pool is
+ever resolved, so a fully-native response does none at all. A candidate that can't be matched is dropped
+with a note rather than substituted.
+
+### The graph cache is deliberately *not* per-backend
+
+`~/.recom/graph.db` is shared by every provider instance — the exact opposite of
+[the per-backend stores](#one-store-per-backend) below, and for the exact opposite reason. Deezer ids are
+service-neutral: *"Excuses — AP Dhillon is Deezer track 1508646682"* is equally true for the YouTube
+instance and the Spotify one. Scoping it per backend would resolve every artist twice and grow a third
+copy on the next service. Override with `RECOM_GRAPH_DB_PATH`.
+
+Negative results are cached alongside positive ones, so a song Deezer genuinely doesn't carry costs two
+searches once rather than on every pass forever.
+
+### A mood corpus that works on any backend
+
+`recommend_for_mood` originally needed YouTube Music's editorial "Moods & moments" playlists, which is
+why mood was YouTube-only. Deezer allows exactly what Spotify forbids — playlists can be *searched and
+read* — so `scripts/build_graph_atlas.py` builds the same kind of evidence for every backend:
+
+```bash
+python scripts/build_graph_atlas.py                     # crawl, materialize, propagate
+python scripts/build_graph_atlas.py --stage crawl --limit 20   # short trial run
+```
+
+The queries are deliberately not English-only. YouTube's mood playlists covered just **4.1%** of this
+library's liked songs, with the misses concentrated on its Punjabi and Bollywood catalogue, so the neutral
+atlas searches for that catalogue by name (`punjabi sad`, `bollywood romantic`, …). Moods are keyed by
+Deezer id and inherited by provider tracks through the cached id bridge, so the labelling work is done
+once no matter how many services you connect.
+
+It ranks *below* the native atlas in `label.SOURCE_PRIORITY` — a playlist merely titled "sad songs" was
+named by a stranger, where a YouTube mood playlist was filed by the service under a taxonomy — and above
+artist propagation. Best available source still wins outright.
+
 ## One store per backend
 
 Every id re-com persists — library rows, cached exclusion sets, mood labels, feedback — belongs to
@@ -318,10 +389,15 @@ characters, a Spotify track id is 22. So each provider instance gets its own fil
 | --- | --- | --- |
 | Store | `~/.recom/store.db` | `~/.recom/store-spotify.db` |
 | Exclusion cache | `~/.recom/library_cache.json` | `~/.recom/library_cache-spotify.json` |
+| Music graph | `~/.recom/graph.db` | `~/.recom/graph.db` — **shared on purpose** |
 
 The default backend keeps the original unsuffixed names, so an existing install keeps its crawled atlas,
 labels and history rather than waking up to an empty store. `RECOM_DB_PATH` / `RECOM_CACHE_PATH` still
 override outright if set.
+
+The [music graph](#the-graph-cache-is-deliberately-not-per-backend) is the one deliberate exception:
+Deezer ids belong to no service, so splitting that file would duplicate work without preventing any
+mistake.
 
 **This is a correctness guarantee, not tidiness.** Sharing one exclusion set between backends doesn't
 merely mix the data — it silently voids the promise this project exists for, because no YouTube videoId
