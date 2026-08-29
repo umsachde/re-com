@@ -155,7 +155,16 @@ def record_playlist(
         conn.execute(
             "INSERT INTO graph_playlist (playlist_id, mood, title, query, track_count, status, crawled_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(playlist_id, mood) DO UPDATE SET "
-            "  title = excluded.title, query = excluded.query, track_count = excluded.track_count, "
+            # `query` is deliberately NOT updated: one playlist is reachable
+            # from several queries, and `crawled_queries`'s legacy fallback
+            # reads "which queries have been asked" out of this column. An
+            # overwrite therefore *erases* the record that the earlier query
+            # ran -- measured 2026-08-29: playlist 12661699283 was re-found by
+            # "hindi gaming" and silently took the attribution away from
+            # "bollywood gaming", which then looked never-asked and was
+            # re-crawled. Same "asked, nothing there" vs "never asked"
+            # distinction the resume point already exists to protect.
+            "  title = excluded.title, track_count = excluded.track_count, "
             "  status = excluded.status, crawled_at = excluded.crawled_at",
             (playlist_id, mood, title, query, len(rows), status, time.time()),
         )

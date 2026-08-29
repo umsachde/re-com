@@ -117,6 +117,15 @@ def _require_mood_support() -> None:
 
     Failing loudly with a reason beats handing back results that look fine
     and are entirely wrong.
+
+    v6's graph atlas removed the *index* half of that objection -- measured
+    2026-08-29, a real Spotify library reaches 40.2% mood coverage (31.2% from
+    `graph_atlas` alone), above the YouTube sample's graph-atlas share. The gate
+    stays shut on the *pipeline* half: `recommend.build` calls
+    `signals.gather_seeds` without `graph_conn`, so on a backend whose
+    `capabilities()` are `(none)` the mood path gathers no candidates at all --
+    measured, 0 songs across all 8 quality-check cases. See PLAN.md's "The
+    Spotify mood gate, measured" for what has to land before this opens.
     """
     if PROVIDER not in MOOD_PROVIDERS:
         raise RuntimeError(

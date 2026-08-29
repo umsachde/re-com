@@ -159,12 +159,29 @@ def main() -> int:
     parser.add_argument("--titles", action="store_true", help="print every pick")
     parser.add_argument("--graph", action="store_true",
                         help="measure music-graph coverage only (needs no mood index, works on any backend)")
+    parser.add_argument("--languages", action="store_true",
+                        help="split library mood coverage by catalogue language and exit")
     args = parser.parse_args()
 
     # No auth check here any more: the sibling *-mcp server owns credentials
     # and reports a clear, actionable error itself if they're missing.
     if args.distinctiveness is not None:
         moodspace.DISTINCTIVENESS_WEIGHT = args.distinctiveness
+
+    if args.languages:
+        conn = store.connect()
+        rows = label_mod.library_coverage_by_language(conn)
+        if not rows:
+            print("error: no library recorded. Run scripts/label_library.py first.", file=sys.stderr)
+            return 1
+        print(f"=== mood coverage by catalogue ({server.PROVIDER}) ===")
+        for language, row in rows.items():
+            sources = " ".join(f"{k}={v}" for k, v in row["by_source"].items()) or "-"
+            print(
+                f"  {language:<10} {row['labelled']:>5}/{row['library']:<5} "
+                f"({row['coverage'] * 100:5.1f}%)  {sources}"
+            )
+        return 0
 
     if args.graph:
         import graph_atlas

@@ -321,6 +321,36 @@ def test_library_coverage_breaks_down_by_source(db):
     assert coverage == {"library": 2, "labelled": 1, "coverage": 0.5, "by_source": {"atlas": 1}}
 
 
+def test_coverage_by_language_separates_the_catalogues(db):
+    """The non-English claim needs a number, and one side must not hide in the other.
+
+    PLAN.md refused to cite a coverage number for the non-English catalogue
+    because `taxonomy.script_language` finds none of it -- the titles are
+    romanised. This split votes with the genre labels instead.
+    """
+    store.sync_library(db, [
+        ("a", "C - Punjabi", False), ("b", "C - Punjabi", False), ("c", "Newest", False),
+    ])
+    store.upsert_tracks(db, [
+        {"videoId": "a", "title": "Brown Munde", "artists": ["AP Dhillon"]},
+        {"videoId": "b", "title": "Excuses", "artists": ["AP Dhillon"]},
+        {"videoId": "c", "title": "As It Was", "artists": ["Harry Styles"]},
+    ])
+    store.put_track_moods(db, "graph_atlas", [("a", ms.ANCHORS["Sad"], 0.5)])
+
+    rows = label.library_coverage_by_language(db)
+    assert rows["punjabi"]["library"] == 2
+    assert rows["punjabi"]["labelled"] == 1
+    assert rows["punjabi"]["by_source"] == {"graph_atlas": 1}
+    # A track no source could place is its own bucket, not evidence either way.
+    assert rows["unknown"] == {"library": 1, "labelled": 0, "by_source": {}, "coverage": 0.0}
+    assert sum(r["library"] for r in rows.values()) == 3
+
+
+def test_coverage_by_language_is_empty_for_an_empty_library(db):
+    assert label.library_coverage_by_language(db) == {}
+
+
 # --- recommend -------------------------------------------------------------
 
 

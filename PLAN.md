@@ -383,6 +383,12 @@ neutral atlas closes the non-English gap is therefore **supported by the crawl**
 `bollywood sad songs` return readable playlists, and materialised moods include Channa Mereya, Bulleya and
 Enna Sona correctly read as sad) but **not yet by a coverage number**. Do not cite one until it is measured.
 
+> **Measured 2026-08-29 — and it qualifies this claim.** `taxonomy.resolve_language` supplies the split
+> `script_language` could not. The neutral atlas does reach the non-English catalogue without bias
+> (39.8% of South Asian tracks carry a graph-atlas label, vs 34.1% of English ones), but it *uniquely*
+> rescues only 4.8% of them, because artist propagation already covered most. "Closes the gap" is too
+> strong: the gap is still 82.1% vs 98.3%. See "The non-English coverage number, measured" below.
+
 **A resume-point bug in this crawler, found by its own output.** The first full run reported
 `queries_crawled 167` against `queries_total 231`: the resume point was inferred from the playlists a query
 produced, so a query that legitimately found nothing was never checked off and would be re-run forever.
@@ -432,6 +438,117 @@ transient provider failure would have crashed a labelling run instead of costing
 **Still open.** `_require_mood_support()` still refuses mood tools on Spotify. The graph atlas makes them
 *possible* there, but per this section's own rule that refusing beats degrading, it should be relaxed only
 once graph-atlas coverage on a Spotify library is measured — not on the assumption that it works.
+
+### The Spotify mood gate, measured (2026-08-29) — coverage passes, the pipeline does not
+
+Coverage was measured, on the real Spotify account rather than a sample: the library was synced
+(`RECOM_PROVIDER=spotify scripts/label_library.py`, 333 tracks across 9 playlists) and the graph moods
+propagated onto it (`scripts/build_graph_atlas.py --stage propagate`).
+
+| | Spotify library (333) | YouTube library, 120-track sample (above) |
+| --- | --- | --- |
+| Resolved to Deezer | **324 (97.3%)** | 84.2% |
+| Carrying a `graph_atlas` mood | **104 (31.2%)** | 25.0% |
+| Any mood, incl. artist propagation | **134 (40.2%)** | — |
+
+So the coverage precondition this section set is met and then some: the neutral atlas gives a backend
+with *no editorial taxonomy at all* the same 40% total coverage YouTube's native atlas reaches, and a
+higher graph-atlas share than the YouTube sample. Resolution is emphatically not the limiting factor —
+324 of 333 resolve; 220 of those resolve to a Deezer track the atlas has never placed in a mood playlist.
+**Growing this number means crawling more of Deezer, not resolving better.**
+
+**The gate still cannot be relaxed, for a different reason than this document assumed.** Measuring the
+end-to-end pipeline rather than only the index (`scripts/quality_check.py` against the Spotify backend)
+returned **0 songs on all 8 cases, in 0.0s each** — the exact silent-degradation the gate exists to
+prevent, and it would have shipped had the flag been flipped on the coverage number alone.
+
+The cause is one line. `recommend.build` gathers candidates with
+
+```python
+per_seed = signals.gather_seeds(yt, [seed["videoId"] for seed in seeds])
+```
+
+and `gather_seeds` takes `graph_conn`/`seed_meta` keyword arguments that this call site does not pass.
+**v6 wired the graph into the v1 similarity tools (`server.py` lines ~537 and ~604) and not into the mood
+path.** On YouTube that is invisible — native signals fill the pool. On Spotify, where `capabilities()`
+resolves to `(none)`, it means the mood path has no candidate source whatsoever: seeds resolve correctly
+(6 mood-appropriate library tracks, verified live), and then nothing is gathered from them.
+
+So the honest ordering is:
+
+1. **Thread the graph through `recommend.build`** — `graph_conn`, `seed_meta`, and the two-stage
+   exclusion + `resolve_candidates` step that `server.py` already performs for `recommend_from_song`.
+   This is a real change to `build`'s contract, not a flag: graph candidates arrive as Deezer records
+   with no provider id, so the mood path needs the same resolve-and-then-check-ids discipline v6 built
+   for the similarity path, or the never-recommend-a-library-song guarantee lapses exactly as design
+   question 3 above describes.
+2. **Re-run the quality check on Spotify.** Mean fit and cross-mood overlap, not just a count.
+3. **Only then** move `"spotify"` into `MOOD_PROVIDERS`.
+
+Recorded because the near-miss is the lesson: a coverage number is a precondition for the gate, not a
+substitute for measuring the thing the gate protects.
+
+### The non-English coverage number, measured (2026-08-29)
+
+This section refused to cite one, correctly: `taxonomy.script_language` finds none of this catalogue
+because the titles are romanised. `taxonomy.resolve_language` can — it votes with genre-page membership
+and artist labels rather than characters — and `label.library_coverage_by_language`
+(`scripts/quality_check.py --languages`) now reports the split so the claim is reproducible rather than
+re-derived by hand.
+
+Measured on the full 1,449-track YouTube library (not a sample), after propagating graph moods onto it —
+**1,253 resolved to Deezer (86.5%), 330 given a `graph_atlas` mood (22.8%)**, which lands right on the
+25% this section reported from a 120-track sample and validates that sample at library scale.
+
+Split by catalogue, with the winning source per track:
+
+| Catalogue | n | Has a mood | via `atlas` | via `graph_atlas` | via `artist` |
+| --- | --- | --- | --- | --- | --- |
+| english | 176 | **98.3%** | 163 | 1 | 9 |
+| hindi | 262 | 84.0% | 77 | 57 | 86 |
+| punjabi | 122 | 77.0% | 65 | 12 | 17 |
+| unplaced | 874 | 65.9% | 162 | 64 | 350 |
+
+`by_source` counts only where a source *won*, and `graph_atlas` ranks below `atlas`, so those columns
+understate its reach. Counting every track that carries a graph-atlas label at all, and separately the
+tracks where it is the **only** label:
+
+| | English (176) | South Asian (392: hindi+punjabi+indian) |
+| --- | --- | --- |
+| Carries a `graph_atlas` label | 34.1% | **39.8%** |
+| `graph_atlas` is its only label | 0.0% | **4.8%** (19 tracks) |
+| Coverage with it | 98.3% | 82.1% |
+| Coverage without it | 98.3% | 77.3% |
+
+**Two findings, and the second one qualifies v6's claim.**
+
+1. **The neutral atlas has no English bias.** It reaches the Punjabi/Bollywood catalogue at a slightly
+   *higher* rate than the English one (39.8% vs 34.1%) — the opposite of YouTube's editorial atlas, which
+   wins on 93% of English tracks and 36% of South Asian ones. That is the thing v6 was built to fix and
+   it is fixed.
+2. **But as a marginal contributor it is small: +4.8 points, not a closed gap.** Artist propagation had
+   already covered most of what the graph atlas finds, so removing graph-atlas labels entirely would drop
+   South Asian coverage from 82.1% to 77.3%, not to nothing. **"The neutral atlas closes the non-English
+   gap" is too strong and should not be written that way.** The gap is still 82.1% vs 98.3%, and what
+   closes it is `atlas` reaching this catalogue — which graph-atlas coverage of Deezer, not resolution,
+   is what would improve (923 of the 1,449 resolved to a Deezer track the atlas has never placed).
+
+Recorded at this length because the sample number and the honest number pointed the same direction but
+differed in size, and the size is what decides whether more crawling is worth doing.
+
+### A second resume-point bug, found by re-running the crawl
+
+The graph atlas database was at 167/231 queries — the pre-fix state. Re-running the crawl to finish it
+surfaced that `crawled_queries`'s **legacy fallback is not merely incomplete, it is destructible.** It
+infers "which queries have been asked" from `graph_playlist.query`, and `record_playlist`'s upsert
+overwrote that column on re-find. One playlist is reachable from several queries, so re-finding it
+*erased* the record that the earlier query ran.
+
+Measured on the real database: playlist 12661699283 was found by `bollywood gaming` on 08-25, re-found by
+`hindi gaming` on 08-29, and `bollywood gaming` then read as never-asked — 230/231, with that one query
+queued to be re-crawled forever. Same "asked, nothing there" vs "never asked" distinction the resume point
+already existed to protect, arriving by a different route. `record_playlist` no longer updates `query` on
+conflict; the first attribution stands.
 
 ## v4 — Respect native YouTube Music dislikes
 
