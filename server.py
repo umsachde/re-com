@@ -53,7 +53,14 @@ RECENT_LIKES_LIMIT = 100
 # playlists, which no other backend has an equivalent of yet -- Spotify
 # forbids reading other users' playlists outright (measured 403). PLAN.md's
 # v6 section covers the provider-neutral replacement.
-MOOD_PROVIDERS = {"youtube"}
+# Mood needs a mood index for the backend's own catalogue. YouTube has an
+# editorial one (`atlas.py`); every other backend gets one from the neutral
+# graph atlas, which is why this is no longer a YouTube-only feature.
+# Spotify was added 2026-08-29 on measured evidence, not on the graph atlas
+# merely existing: 40.2% library mood coverage (31.2% from `graph_atlas`
+# alone), and a full pipeline returning real, mood-ranked Spotify tracks --
+# see PLAN.md, "The Spotify mood gate".
+MOOD_PROVIDERS = {"youtube", "spotify"}
 
 mcp = MCPServer("re-com" if PROVIDER == "youtube" else f"re-com-{PROVIDER}")
 
@@ -809,6 +816,7 @@ def recommend_for_mood(
     # needing its own cron.
     _s.infer_implicit_feedback(conn)
     exclude = _library_video_ids(yt) | _s.rejected_video_ids(conn)
+    graph_conn = _graph()
 
     result = recommend.build(
         yt, conn, exclude=exclude, feeling=feeling, vector=vector,
@@ -816,6 +824,8 @@ def recommend_for_mood(
         language=language, exclude_languages=exclude_languages,
         allow_unlabelled_language=allow_unlabelled_language,
         bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
+        graph_conn=graph_conn,
+        exclude_index=_library_exclusion_index() if graph_conn else None,
     )
     _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
     return result
@@ -899,6 +909,7 @@ def recommend_from_playlist_for_mood(
         | _s.rejected_video_ids(conn)
         | {t["videoId"] for t in tracks}
     )
+    graph_conn = _graph()
 
     result = recommend.build(
         yt, conn, exclude=exclude, feeling=feeling, vector=vector,
@@ -907,6 +918,8 @@ def recommend_from_playlist_for_mood(
         allow_unlabelled_language=allow_unlabelled_language,
         bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
         seeds=picked["seeds"], resolved=resolved,
+        graph_conn=graph_conn,
+        exclude_index=_library_exclusion_index() if graph_conn else None,
     )
     result["seed_report"] = {
         "playlist_id": playlist_id,

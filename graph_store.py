@@ -29,6 +29,7 @@ empty, so "never asked" stays distinguishable from "asked, nothing there".
 
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -143,6 +144,13 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
+class _Connection(sqlite3.Connection):
+    """A connection that can carry the two facts `for_thread` needs."""
+
+    _recom_path: Path | None = None
+    _recom_thread: int | None = None
+
+
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
     """Open (creating if needed) the graph cache.
 
@@ -152,13 +160,56 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     """
     target = Path(path) if path is not None else DB_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(target, timeout=30.0)
+    # `_Connection` rather than the bare class so `for_thread` can record where
+    # this connection points; sqlite3.Connection takes no attributes.
+    conn = sqlite3.connect(target, timeout=30.0, factory=_Connection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(SCHEMA)
+    conn._recom_path = target
+    conn._recom_thread = threading.get_ident()
     return conn
+
+
+_thread_local = threading.local()
+
+
+def for_thread(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """The same database, on a connection this thread is allowed to use.
+
+    `sqlite3.threadsafety` is 1 here: the module is thread-safe but a
+    *connection* is not shareable, and using one off its creating thread raises
+    ProgrammingError. `signals.gather_seeds` fans seeds out across a thread
+    pool and hands each worker the graph connection, so every graph lookup in a
+    multi-seed request raised -- and `skip_failures` swallowed it, leaving an
+    empty candidate pool and no error. Measured on Spotify, where the graph is
+    the *only* source of candidates: 6 seeds in, 0 candidates out, silently.
+
+    `recommend_from_song` never hit this because a single seed deliberately
+    stays on the calling thread, which is why v6's Spotify measurement looked
+    healthy.
+
+    Opening a second connection is the right fix rather than
+    `check_same_thread=False`: with threadsafety 1 that flag disables the check
+    without making concurrent use safe. Connections are cached per thread, so a
+    thread pays for this once, and WAL means readers never block each other.
+    """
+    if getattr(conn, "_recom_thread", None) == threading.get_ident():
+        return conn
+
+    path = getattr(conn, "_recom_path", None)
+    if path is None:  # a connection we did not open (tests, in-memory)
+        return conn
+
+    cache = getattr(_thread_local, "conns", None)
+    if cache is None:
+        cache = _thread_local.conns = {}
+    existing = cache.get(str(path))
+    if existing is None:
+        existing = cache[str(path)] = connect(path)
+    return existing
 
 
 # --- fetch bookkeeping ------------------------------------------------------

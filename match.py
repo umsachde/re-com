@@ -38,6 +38,29 @@ _BRACKETS = (("(", ")"), ("[", "]"))
 _QUALIFIER_MARKERS = (" - ", " feat.", " ft.", " with ")
 
 
+# How `store` joins several credits into the one `track.artists` column.
+CREDIT_SEPARATOR = " & "
+
+
+def artist_list(artists: Any) -> list[str]:
+    """Artist names as a list, from either a list or one joined credit.
+
+    The store keeps `artists` as a single joined string ("AP Dhillon & Gurinder
+    Gill") while every graph and provider path wants a list. Strings are
+    iterable, so handing the joined form to code expecting a list silently
+    yields *letters* -- this project has now hit that three separate times
+    (`store._artist_names` splitting "AP Dhillon" into "A & P & ...",
+    `taxonomy.as_languages` filtering for "e, n, g, l, i, s, h", and a seed
+    artist arriving as "A"). Normalising at one funnel is the fix that
+    generalises, which is why it lives here with the rest of song identity.
+    """
+    if not artists:
+        return []
+    if isinstance(artists, str):
+        return [part.strip() for part in artists.split(CREDIT_SEPARATOR) if part.strip()]
+    return [str(a).strip() for a in artists if a and str(a).strip()]
+
+
 def song_key(title: str) -> str:
     """Normalise a title to its identity: drop bracketed qualifiers,
     feature credits, punctuation and case.

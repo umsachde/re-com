@@ -236,6 +236,12 @@ def _add_graph_candidates(
         return
 
     import graph  # local: keeps the graph optional at import time
+    import graph_store
+
+    # This runs on a worker thread when there is more than one seed, and a
+    # sqlite connection belongs to the thread that opened it. See
+    # graph_store.for_thread.
+    graph_conn = graph_store.for_thread(graph_conn)
 
     artists = meta.get("artists") or []
     primary = artists[0] if artists else None

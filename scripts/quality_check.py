@@ -107,13 +107,17 @@ def measure_graph(graph_conn, limit: int = 10) -> dict:
     return out
 
 
-def measure(yt, conn, limit: int = 10) -> dict:
+def measure(yt, conn, limit: int = 10, graph_conn=None) -> dict:
+    """`graph_conn` mirrors what the server passes, so this measures the
+    pipeline that ships rather than a graph-blind variant of it."""
     exclude = store.library_video_ids(conn) | store.rejected_video_ids(conn)
+    exclude_index = server._library_exclusion_index() if graph_conn else None
     rows = []
     for feeling, context, arc in CASES:
         started = time.time()
         result = recommend.build(yt, conn, exclude=exclude, feeling=feeling,
-                                 context=context, arc=arc, limit=limit)
+                                 context=context, arc=arc, limit=limit,
+                                 graph_conn=graph_conn, exclude_index=exclude_index)
         songs = result["songs"]
         fits = [s["mood_fit"] for s in songs if s["mood_fit"] is not None]
         rows.append({
@@ -159,6 +163,8 @@ def main() -> int:
     parser.add_argument("--titles", action="store_true", help="print every pick")
     parser.add_argument("--graph", action="store_true",
                         help="measure music-graph coverage only (needs no mood index, works on any backend)")
+    parser.add_argument("--no-graph", action="store_true",
+                        help="measure without the music graph, to A/B what it contributes")
     parser.add_argument("--languages", action="store_true",
                         help="split library mood coverage by catalogue language and exit")
     args = parser.parse_args()
@@ -208,7 +214,11 @@ def main() -> int:
         print("error: no library recorded. Run scripts/label_library.py first.", file=sys.stderr)
         return 1
 
-    result = measure(server._client(), conn, limit=args.limit)
+    graph_conn = None
+    if not args.no_graph:
+        import graph_store
+        graph_conn = graph_store.connect()
+    result = measure(server._client(), conn, limit=args.limit, graph_conn=graph_conn)
     result["label"] = args.label
 
     cov = result["library_coverage"]

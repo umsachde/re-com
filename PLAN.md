@@ -435,9 +435,9 @@ its `--claude` lyric pass: `lyrics.fetch` calls `yt.get_lyrics()`, which `ytmusi
 no lyric support at all (Spotify), and its `_TRANSIENT` tuple gained `ProviderError`, without which a
 transient provider failure would have crashed a labelling run instead of costing one song.
 
-**Still open.** `_require_mood_support()` still refuses mood tools on Spotify. The graph atlas makes them
-*possible* there, but per this section's own rule that refusing beats degrading, it should be relaxed only
-once graph-atlas coverage on a Spotify library is measured — not on the assumption that it works.
+**Closed 2026-08-29.** `_require_mood_support()` refused mood tools on Spotify. Coverage was measured,
+the pipeline was found to be the real blocker rather than the index, the pipeline was fixed, and the gate
+then opened on the numbers below.
 
 ### The Spotify mood gate, measured (2026-08-29) — coverage passes, the pipeline does not
 
@@ -474,19 +474,59 @@ path.** On YouTube that is invisible — native signals fill the pool. On Spotif
 resolves to `(none)`, it means the mood path has no candidate source whatsoever: seeds resolve correctly
 (6 mood-appropriate library tracks, verified live), and then nothing is gathered from them.
 
-So the honest ordering is:
-
-1. **Thread the graph through `recommend.build`** — `graph_conn`, `seed_meta`, and the two-stage
-   exclusion + `resolve_candidates` step that `server.py` already performs for `recommend_from_song`.
-   This is a real change to `build`'s contract, not a flag: graph candidates arrive as Deezer records
-   with no provider id, so the mood path needs the same resolve-and-then-check-ids discipline v6 built
-   for the similarity path, or the never-recommend-a-library-song guarantee lapses exactly as design
-   question 3 above describes.
-2. **Re-run the quality check on Spotify.** Mean fit and cross-mood overlap, not just a count.
-3. **Only then** move `"spotify"` into `MOOD_PROVIDERS`.
-
 Recorded because the near-miss is the lesson: a coverage number is a precondition for the gate, not a
 substitute for measuring the thing the gate protects.
+
+### The mood path, wired to the graph and the gate opened (2026-08-29)
+
+Done in that order — the graph threaded through `recommend.build`, measured on both backends, and only
+then `"spotify"` added to `MOOD_PROVIDERS`.
+
+| | YouTube without graph | YouTube with graph | Spotify with graph |
+| --- | --- | --- | --- |
+| mean fit | 0.797 | **0.820** | 0.767 |
+| cross-mood overlap (lower better) | 0.121 | **0.096** | 0.201 |
+| distinct songs / 80 slots | 58 | 58 | 43 / 74 |
+| rated | 98% | 98% | 85% |
+
+**YouTube improves rather than regresses**, on both headline metrics, and warm latency is unchanged at
+5.4s — a fully-native sequence performs zero provider searches, exactly as on the similarity path.
+Spotify is materially weaker than YouTube (0.201 overlap against 0.096, on a 333-track library with no
+editorial atlas) but is now genuinely working rather than empty, which is the bar the gate was holding.
+
+**Three design points worth keeping.**
+
+1. **A graph candidate's mood is read from the graph, not the provider.** `graph_atlas.get_mood` on the
+   candidate's own Deezer id — the same id bridge `propagate_to_provider` walks offline for the library,
+   done inline for candidates and costing no network call. Without it every graph candidate arrives
+   unrated and is capped as filler by `_cap_fluff`, which on a backend where they are the *only*
+   candidates means mood ranking is blind exactly where it does all the work.
+2. **Resolution happens after sequencing, and loops.** The sequencer has already chosen the songs that
+   will be returned, so that is the smallest set needing provider ids. But a candidate that fails to
+   resolve leaves its arc slot empty, and appending a replacement would put an unslotted song at the end
+   of a curve the user asked to be shaped — measured, a 10-song YouTube request came back with 9. Dead
+   candidates are dropped and the arc re-sequenced instead, up to `_RESOLVE_ROUNDS`.
+3. **Exclusion is two-stage here too.** `blocked` holds provider ids; a graph candidate is keyed
+   `graph:<deezer id>` and has none, so testing it against `blocked` always passes. Without the
+   title/artist index the never-recommend-a-library-song guarantee silently stopped applying to every
+   graph candidate on this path — the same hole `signals._finalize` exists to close on the similarity
+   path, which this path had never had.
+
+**Two bugs found while wiring it, both pre-existing and both silent.**
+
+- **The graph connection could not survive `gather_seeds`' thread pool.** `sqlite3.threadsafety` is 1
+  here: a connection used off its creating thread raises `ProgrammingError`, and `gather_seeds` swallows
+  per-seed exceptions by design. So **every multi-seed request lost its graph candidates without a word**
+  — which means `recommend_from_playlist` has been quietly graph-less on Spotify since v6 shipped, not
+  just the mood path. `recommend_from_song` never showed it because a single seed deliberately stays on
+  the calling thread, which is why v6's headline Spotify measurement looked healthy. Fixed with
+  `graph_store.for_thread`, a per-thread connection, rather than `check_same_thread=False` — at
+  threadsafety 1 that flag disables the check without making concurrent use safe.
+- **A joined credit read one letter at a time, for the third time.** `pick_seeds` returns `artists` as
+  the store's joined string, so the graph looked up an artist called `"A"`. Same shape as
+  `store._artist_names` ("AP Dhillon" → `"A & P & ..."`) and `taxonomy.as_languages`
+  (`language="english"` → a filter for `e, n, g, l, i, s, h`). Three instances is enough: normalising now
+  lives once, in `match.artist_list`, next to the rest of song identity.
 
 ### The non-English coverage number, measured (2026-08-29)
 

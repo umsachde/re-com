@@ -680,3 +680,174 @@ def test_graph_can_be_disabled_by_environment(monkeypatch):
     monkeypatch.setattr(server, "GRAPH_ENABLED", False)
     monkeypatch.setattr(server, "_graph_conn_cache", None)
     assert server._graph() is None
+
+
+# --- v6 follow-up: the mood path was never wired to the graph ----------------
+
+
+def _mood_library(db):
+    """One library song with a Sad label, so pick_seeds has something to use."""
+    import moodspace as ms
+    store.sync_library(db, [("seed", "Liked Music", True)])
+    store.upsert_tracks(db, [{"videoId": "seed", "title": "Excuses", "artists": ["AP Dhillon"]}])
+    store.put_track_moods(db, "atlas", [("seed", ms.ANCHORS["Sad"], 0.9)])
+
+
+def test_mood_recommendations_use_the_graph_on_a_backend_with_no_native_signals(
+    db, graph_db, monkeypatch
+):
+    """The gap this fixes, stated as the failure it actually was.
+
+    v6 wired the graph into `recommend_from_song`/`recommend_from_playlist` and
+    not into `recommend.build`, which called `gather_seeds` without
+    `graph_conn`. On YouTube that was invisible -- native signals fill the pool.
+    Measured on Spotify, where `capabilities()` is `(none)`: 6 seeds resolved
+    correctly and 0 candidates came back, so every mood returned 0 songs.
+    """
+    import graph_atlas
+    import moodspace as ms
+    import recommend
+
+    monkeypatch.setattr(graph, "_get", _deezer_for_ap_dhillon())
+    _mood_library(db)
+    # The graph atlas knows a mood for one of the neighbours.
+    graph_atlas.record_playlist(
+        graph_db, 7, "Sad", "sad songs", "Sad Mix",
+        [{"id": 200, "title": "Elevated", "artist_name": "Shubh"}],
+    )
+    graph_atlas.materialize_moods(graph_db)
+
+    provider_no_signals = _FakeProvider(
+        capabilities=set(),
+        search_results={"Elevated Shubh": [
+            {"videoId": "sp_elevated", "title": "Elevated", "artists": [{"name": "Shubh"}]}
+        ]},
+    )
+
+    result = recommend.build(
+        provider_no_signals, db, exclude={"seed"}, feeling="heartbroken",
+        arc="mirror", limit=3, use_history=False, graph_conn=graph_db,
+    )
+
+    assert result["songs"], "a backend with no native signals must still get candidates"
+    assert [s["videoId"] for s in result["songs"]] == ["sp_elevated"]
+    # And it arrives mood-rated, from the graph atlas rather than unrated
+    # filler -- which is the whole point on a backend where graph candidates
+    # are the only candidates.
+    assert result["songs"][0]["mood_source"] == graph_atlas.SOURCE
+    assert result["songs"][0]["rated"] is True
+
+
+def test_a_graph_candidate_never_leaks_its_pool_key_as_a_provider_id(db, graph_db, monkeypatch):
+    """`graph:<deezer id>` is not an id any backend can play."""
+    import recommend
+
+    monkeypatch.setattr(graph, "_get", _deezer_for_ap_dhillon())
+    _mood_library(db)
+    # Nothing resolves: every graph candidate should be dropped, not returned
+    # under its pool key.
+    provider_no_signals = _FakeProvider(capabilities=set(), search_results={})
+
+    result = recommend.build(
+        provider_no_signals, db, exclude={"seed"}, feeling="heartbroken",
+        arc="mirror", limit=3, use_history=False, graph_conn=graph_db,
+    )
+
+    assert result["songs"] == []
+    assert any("couldn't be matched" in note for note in result["notes"])
+
+
+def test_mood_path_excludes_library_songs_that_have_no_provider_id_yet(db, graph_db, monkeypatch):
+    """Stage one of exclusion, on the mood path.
+
+    A graph candidate is keyed `graph:<deezer id>` and has no provider id, so
+    testing it against the id-keyed exclusion set always passes. Without a
+    title/artist check the never-recommend-a-library-song guarantee silently
+    stops applying to every graph candidate.
+    """
+    import match as match_mod
+    import recommend
+
+    monkeypatch.setattr(graph, "_get", _deezer_for_ap_dhillon())
+    _mood_library(db)
+    provider_no_signals = _FakeProvider(
+        capabilities=set(),
+        search_results={"Elevated Shubh": [
+            {"videoId": "sp_elevated", "title": "Elevated", "artists": [{"name": "Shubh"}]}
+        ]},
+    )
+
+    # The library already contains "Elevated" by Shubh, under a different id.
+    index = match_mod.build_index([("Elevated", "Shubh")])
+    result = recommend.build(
+        provider_no_signals, db, exclude={"seed"}, feeling="heartbroken",
+        arc="mirror", limit=3, use_history=False, graph_conn=graph_db,
+        exclude_index=index,
+    )
+
+    assert "Elevated" not in [s["title"] for s in result["songs"]]
+    # And it was dropped before resolution, not after: stage one is also the
+    # optimisation that keeps an excluded candidate from costing a search.
+    assert "Elevated Shubh" not in provider_no_signals.search_calls
+
+
+def test_the_graph_is_untouched_when_no_connection_is_passed(db, monkeypatch):
+    """v1 behaviour, exactly. Every existing caller relies on this."""
+    import recommend
+
+    def explode(_url):
+        raise AssertionError("the graph must not be consulted without graph_conn")
+
+    monkeypatch.setattr(graph, "_get", explode)
+    _mood_library(db)
+    provider_with_radio = _FakeProvider(
+        watch={"seed": {"tracks": [
+            {"videoId": "native1", "title": "Native", "artists": [{"name": "Someone"}]}
+        ]}},
+    )
+    result = recommend.build(
+        provider_with_radio, db, exclude={"seed"}, feeling="heartbroken",
+        arc="mirror", limit=1, use_history=False,
+    )
+    assert [s["videoId"] for s in result["songs"]] == ["native1"]
+
+
+def test_the_graph_survives_being_used_from_a_worker_thread(graph_db, monkeypatch):
+    """`gather_seeds` fans seeds out across a thread pool.
+
+    `sqlite3.threadsafety` is 1: a connection used off its creating thread
+    raises ProgrammingError, and `gather_seeds` swallows per-seed exceptions by
+    design. So every multi-seed request lost its graph candidates *silently* --
+    invisible on YouTube, total on a backend where the graph is the only
+    source. This is the regression test for that, and it must stay
+    multi-seed: the single-seed path deliberately stays on the calling thread,
+    which is why `recommend_from_song` never showed it.
+    """
+    monkeypatch.setattr(graph, "_get", _deezer_for_ap_dhillon())
+    fake = _FakeProvider(capabilities=set())
+
+    per_seed = signals.gather_seeds(
+        fake, ["seed_a", "seed_b"],
+        graph_conn=graph_db,
+        seed_meta={
+            "seed_a": {"title": "Excuses", "artists": ["AP Dhillon"]},
+            "seed_b": {"title": "Excuses", "artists": ["AP Dhillon"]},
+        },
+    )
+
+    assert len(per_seed) == 2, "a seed must not be lost to a cross-thread error"
+    assert all(found for found in per_seed), "each seed must return graph candidates"
+
+
+def test_a_joined_credit_is_not_read_one_letter_at_a_time():
+    """Third instance of the same bug; see match.artist_list.
+
+    The store keeps artists as one joined string. Handed to code expecting a
+    list, "AP Dhillon" becomes ["A", "P", ...] and the graph looks up an
+    artist called "A".
+    """
+    assert match.artist_list("AP Dhillon & Gurinder Gill") == ["AP Dhillon", "Gurinder Gill"]
+    assert match.artist_list("AP Dhillon") == ["AP Dhillon"]
+    assert match.artist_list(["AP Dhillon"]) == ["AP Dhillon"]
+    assert match.artist_list(None) == []
+    assert match.artist_list("") == []

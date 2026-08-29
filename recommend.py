@@ -18,6 +18,7 @@ from typing import Any, Iterable
 import arc as arc_module
 import filters
 import label
+import match
 import moodspace
 import sense
 import signals
@@ -468,6 +469,65 @@ def _is_genuine_match(song: dict[str, Any]) -> bool:
     return bool(song["rated"]) and song["mood_fit"] is not None and song["mood_fit"] > arc_module.UNRATED_FIT
 
 
+# How many times to re-sequence after music-graph candidates fail to resolve.
+# Each round costs only the searches for candidates newly promoted into the
+# sequence, and three is enough for the drop rates measured (1 in 10).
+_RESOLVE_ROUNDS = 3
+
+
+def _sequence_and_resolve(
+    yt: Any,
+    shortlist: list[dict[str, Any]],
+    slot_targets: list[dict[str, float]],
+    blocked: set[str],
+    has_graph: bool,
+) -> tuple[list[dict[str, Any]], int]:
+    """Sequence the arc, then give the chosen songs provider ids.
+
+    **Stage two of exclusion, and the only place a provider search happens.**
+    Resolving after sequencing rather than before ranking is the same lazy
+    discipline v6 measured into `resolve_candidates`: the sequencer has already
+    chosen exactly the songs that will be returned, so this is the smallest set
+    that needs ids -- and zero searches happen when native signals filled the
+    response, which is what keeps YouTube's latency where it was.
+
+    **Why it loops.** A candidate that fails to resolve leaves its arc slot
+    empty, and simply appending a replacement would put an unslotted song at
+    the end of a curve the user asked to be shaped. Dropping the dead
+    candidates and re-sequencing instead lets the next-best song claim that
+    slot properly. Measured: a 10-song YouTube request lost one candidate at
+    resolution and came back with 9 before this.
+    """
+    def ref_of(candidate: dict[str, Any]) -> int | None:
+        return (candidate.get("graphRef") or {}).get("trackId")
+
+    dead: set[int] = set()
+    total_unresolved = 0
+    ordered: list[dict[str, Any]] = []
+
+    for _ in range(_RESOLVE_ROUNDS):
+        pool = [c for c in shortlist if ref_of(c) not in dead]
+        ordered = arc_module.sequence(pool, slot_targets)
+        # Nothing to resolve: no graph in play, or the sequence is all native.
+        if not has_graph or all(c.get("videoId") for c in ordered):
+            return ordered, total_unresolved
+
+        resolved, unresolved = signals.resolve_candidates(
+            yt, ordered, len(ordered), blocked
+        )
+        total_unresolved += unresolved
+        if not unresolved or len(resolved) >= len(slot_targets):
+            return resolved, total_unresolved
+
+        # `resolve_candidates` works in place and pops `graphRef` off the ones
+        # it resolved, so whatever still carries a reference is exactly what
+        # failed -- and must not be offered the slot again next round.
+        dead |= {ref_of(c) for c in ordered if ref_of(c) is not None}
+        ordered = resolved
+
+    return ordered, total_unresolved
+
+
 def _cap_fluff(ordered: list[dict[str, Any]], requested: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Bound how much of the sequenced list is filler.
 
@@ -497,6 +557,39 @@ def _cap_fluff(ordered: list[dict[str, Any]], requested: int) -> tuple[list[dict
     }
 
 
+def _graph_moods(graph_conn: Any, pool: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Moods for graph candidates, read straight out of the graph atlas.
+
+    Keyed by the pool key (`graph:<deezer id>`), so it merges into the same
+    dict `label.resolve_or_derive` returns and nothing downstream needs to know
+    a candidate came from the graph. Reported as source `graph_atlas`, the same
+    name the propagated library labels carry, so `SOURCE_PRIORITY` and every
+    coverage report keep meaning one thing.
+    """
+    if graph_conn is None:
+        return {}
+
+    import graph_atlas  # local: keeps the graph optional at import time
+
+    out: dict[str, dict[str, Any]] = {}
+    for key, candidate in pool.items():
+        ref = candidate.get("graphRef")
+        if not ref or not ref.get("trackId"):
+            continue
+        mood = graph_atlas.get_mood(graph_conn, ref["trackId"])
+        if not mood:
+            continue
+        out[key] = {
+            "vector": moodspace.vector(
+                valence=mood["valence"], energy=mood["energy"],
+                tension=mood["tension"], depth=mood["depth"],
+            ),
+            "source": graph_atlas.SOURCE,
+            "confidence": mood["confidence"] if mood["confidence"] is not None else 0.5,
+        }
+    return out
+
+
 def build(
     yt: Any,
     conn: Any,
@@ -516,6 +609,8 @@ def build(
     use_history: bool = True,
     seeds: list[dict[str, Any]] | None = None,
     resolved: dict[str, Any] | None = None,
+    graph_conn: Any = None,
+    exclude_index: dict[str, list[str | None]] | None = None,
 ) -> dict[str, Any]:
     """Produce a mood-shaped, ordered set of new songs.
 
@@ -537,7 +632,29 @@ def build(
         seeds = pick_seeds(conn, target, genres=genres)
     notes = list(resolved.get("evidence", []))
 
-    per_seed = signals.gather_seeds(yt, [seed["videoId"] for seed in seeds])
+    # The graph, threaded through exactly as the v1 similarity tools do. v6
+    # wired it into `recommend_from_song`/`recommend_from_playlist` and not
+    # into this path, which was invisible on YouTube -- native signals fill the
+    # pool -- and total on a backend whose `capabilities()` are `(none)`:
+    # measured on Spotify, 0 candidates and therefore 0 songs, on every mood.
+    per_seed = signals.gather_seeds(
+        yt,
+        [seed["videoId"] for seed in seeds],
+        graph_conn=graph_conn,
+        seed_meta={
+            seed["videoId"]: {
+                "title": seed.get("title"),
+                # `artists` arrives from the store as one joined credit
+                # ("AP Dhillon & Gurinder Gill"), and the graph wants a list.
+                # Handing the string straight over makes `artists[0]` the
+                # letter "A" -- the same string-is-iterable bug that produced
+                # "A & P &  & D & h..." in store._artist_names and a language
+                # filter for "e, n, g, l, i, s, h". Third time; hence match.py.
+                "artists": match.artist_list(seed.get("artists")),
+            }
+            for seed in seeds if seed.get("videoId")
+        },
+    )
 
     merged = signals._merge_and_score(per_seed)
 
@@ -557,7 +674,23 @@ def build(
     # covers this (seeds come from the library), but atlas_neighbours can
     # resurface one, and a caller may pass a narrower exclusion set.
     blocked = set(exclude) | {seed["videoId"] for seed in seeds}
-    pool = {vid: c for vid, c in merged.items() if vid not in blocked}
+    # **Exclusion is two-stage here too, and this is stage one.** `blocked`
+    # holds provider ids; a graph candidate is keyed `graph:<deezer id>` and
+    # has no provider id yet, so testing it against `blocked` always passes and
+    # the never-recommend-a-library-song guarantee would silently stop applying
+    # to every graph-sourced candidate -- the exact hole signals._finalize
+    # exists to close on the similarity path. Stage two is by id, after
+    # resolution, below.
+    pool = {}
+    for vid, c in merged.items():
+        if c.get("videoId"):
+            if vid in blocked:
+                continue
+        elif exclude_index is not None and match.matches_any(
+            c.get("title"), (c.get("artists") or [None])[0], exclude_index
+        ):
+            continue
+        pool[vid] = c
 
     pool, variants_collapsed = signals._collapse_variants(pool)
     if variants_collapsed:
@@ -578,6 +711,15 @@ def build(
         }
 
     moods = label.resolve_or_derive(conn, pool.keys())
+    # A graph candidate has no provider id, so `label` has nothing to look up
+    # for it -- but the graph atlas already holds a mood for that exact Deezer
+    # track. Reading it here is the same id bridge
+    # `graph_atlas.propagate_to_provider` walks offline for the library, done
+    # inline for candidates, and it costs no network call. Without it every
+    # graph candidate would arrive unrated and be capped as filler, which on a
+    # backend where they are the *only* candidates means mood ranking is blind
+    # exactly where it does all of the work.
+    moods.update(_graph_moods(graph_conn, pool))
     known_artists = _library_artists(conn)
     affinity = artist_affinity(conn)
 
@@ -590,7 +732,12 @@ def build(
         boost = (KNOWN_ARTIST_BOOST if known else 1.0) * learned
         candidates.append(
             {
-                "videoId": video_id,
+                # A graph candidate's pool key is `graph:<deezer id>`, not a
+                # provider id. It must stay null until resolution, or the key
+                # leaks into results and into the exclusion check as if it
+                # were one.
+                "videoId": candidate.get("videoId"),
+                **({"graphRef": candidate["graphRef"]} if candidate.get("graphRef") else {}),
                 "title": candidate["title"],
                 "artists": candidate["artists"],
                 "album": candidate.get("album"),
@@ -626,7 +773,14 @@ def build(
     shortlist.sort(key=lambda c: -c["base_score"])
 
     slot_targets = arc_module.targets(target, arc, limit)
-    ordered = arc_module.sequence(shortlist, slot_targets)
+    ordered, unresolved = _sequence_and_resolve(
+        yt, shortlist, slot_targets, blocked, graph_conn is not None
+    )
+    if unresolved:
+        notes.append(
+            f"Dropped {unresolved} music-graph candidate(s) that couldn't be matched to a song "
+            "on this service (or turned out to be in your library after matching)."
+        )
 
     ordered, match_quality = _cap_fluff(ordered, requested=limit)
     if match_quality["genuine"] < limit:

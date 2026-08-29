@@ -116,7 +116,15 @@ def apply_tempo(
     known = store.get_tempos(conn, [c["videoId"] for c in candidates])
 
     if resolve_missing:
-        pending = [c for c in candidates[:shortlist] if c["videoId"] not in known]
+        # `c["videoId"]` is null for a music-graph candidate that has not been
+        # resolved yet. Fetching for one would look up a tempo and then cache
+        # it under a NULL id -- every unresolved candidate colliding on the
+        # same key. They keep their place unscored instead, which is what this
+        # module already does for any song with no known tempo.
+        pending = [
+            c for c in candidates[:shortlist]
+            if c.get("videoId") and c["videoId"] not in known
+        ]
         for candidate in pending:
             kwargs = {"sleep": sleep} if sleep else {}
             bpm = tempo_mod.get_or_fetch(
