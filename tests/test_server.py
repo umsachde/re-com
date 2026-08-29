@@ -836,11 +836,20 @@ def test_recommend_from_playlist_excludes_songs_in_other_playlists(monkeypatch):
     assert ids == {"cand1"}
 
 
-def test_recommend_from_playlist_empty_playlist_returns_empty(monkeypatch):
+def test_recommend_from_playlist_says_why_it_cannot_read_a_playlist(monkeypatch):
+    """An unreadable playlist must not look like an exhausted one.
+
+    This returned a bare [] -- indistinguishable from "nothing new to
+    recommend here". Measured on Spotify, where the post-Nov-2024 restriction
+    403s every playlist read, that meant an empty answer in 1.5s with no
+    reason given. `recommend_from_playlist_for_mood` already raised on the
+    same condition; the two now give one answer, not two.
+    """
     yt = _FakeYT(playlists={"PL1": {"tracks": []}, "LM": {"tracks": []}})
     monkeypatch.setattr(server, "_client", lambda: yt)
 
-    assert recommend_from_playlist("PL1") == []
+    with pytest.raises(RuntimeError, match="no playable tracks"):
+        recommend_from_playlist("PL1")
 
 
 def test_recommend_from_playlist_samples_when_over_seed_size(monkeypatch):

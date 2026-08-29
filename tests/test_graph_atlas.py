@@ -252,3 +252,23 @@ def test_lyrics_still_outrank_both_atlases(db):
     store.put_track_mood(db, "yt1", graph_atlas.SOURCE, moodspace.vector(valence=0.8), 0.9)
     store.put_track_mood(db, "yt1", "lyrics", moodspace.vector(valence=-0.8), 0.9)
     assert label.resolve(db, "yt1")["source"] == "lyrics"
+
+
+def test_a_playlist_refound_by_a_later_query_keeps_the_first_attribution(graph_db, monkeypatch):
+    """Re-finding a playlist must not erase the record that an earlier query ran.
+
+    `crawled_queries`'s legacy fallback reads "which queries have been asked"
+    out of `graph_playlist.query`. One playlist is reachable from several
+    queries, so overwriting that column on re-find deletes the earlier query
+    from the resume point and it is crawled forever. Measured on the real
+    database 2026-08-29: playlist 12661699283 was found by "bollywood gaming",
+    re-found by "hindi gaming", and "bollywood gaming" then read as never-asked
+    -- the same "asked, nothing there" vs "never asked" failure the resume
+    point already exists to prevent, arriving by a different route.
+    """
+    tracks = [_dz_track(1, "Channa Mereya", "Pritam")]
+    graph_atlas.record_playlist(graph_db, 42, "Gaming", "bollywood gaming", "Mix", tracks)
+    assert ("Gaming", "bollywood gaming") in graph_atlas.crawled_queries(graph_db)
+
+    graph_atlas.record_playlist(graph_db, 42, "Gaming", "hindi gaming", "Mix", tracks)
+    assert ("Gaming", "bollywood gaming") in graph_atlas.crawled_queries(graph_db)

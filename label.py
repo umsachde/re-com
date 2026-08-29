@@ -29,6 +29,7 @@ from typing import Any, Iterable
 
 import moodspace
 import store
+import taxonomy
 
 SOURCE_PRIORITY = ("llm", "lyrics", "atlas", "graph_atlas", "artist")
 _RANK = {source: index for index, source in enumerate(SOURCE_PRIORITY)}
@@ -252,6 +253,54 @@ def sync_library(conn: Any, yt: Any) -> dict[str, int]:
     store.upsert_tracks(conn, tracks)
     rows = store.sync_library(conn, entries)
     return {"playlists": playlists, "rows": rows, "unique_tracks": len(store.library_video_ids(conn))}
+
+
+def library_coverage_by_language(conn: Any) -> dict[str, dict[str, Any]]:
+    """The same coverage number, split by the catalogue it applies to.
+
+    v6's claim was that a neutral atlas closes the non-English gap YouTube's
+    editorial moods leave. PLAN.md deliberately refused to attach a number to
+    that, because the obvious way to find the non-English subset -- running
+    `taxonomy.script_language` over titles -- returns zero here: this library's
+    Punjabi and Bollywood titles are romanised ("Brown Munde", not
+    "ਬਰਾਊਨ ਮੁੰਡੇ"), so script detection cannot see them.
+
+    `taxonomy.resolve_language` can: it votes with genre-page membership and
+    artist labels rather than the characters in a title. Tracks it cannot place
+    are reported under `unknown` rather than folded into either side -- an
+    unlabelled track is not evidence for or against the claim.
+    """
+    library = store.library_video_ids(conn)
+    if not library:
+        return {}
+
+    resolved = resolve_or_derive(conn, library)
+    meta = {
+        r["video_id"]: dict(r)
+        for r in conn.execute(
+            "SELECT l.video_id, t.title, t.artists FROM library_track l "
+            "LEFT JOIN track t ON t.video_id = l.video_id"
+        )
+    }
+
+    out: dict[str, dict[str, Any]] = {}
+    for video_id in library:
+        row = meta.get(video_id) or {}
+        language = taxonomy.resolve_language(
+            conn, video_id, row.get("title"), row.get("artists")
+        )
+        key = language["language"] if language else "unknown"
+        bucket = out.setdefault(key, {"library": 0, "labelled": 0, "by_source": {}})
+        bucket["library"] += 1
+        entry = resolved.get(video_id)
+        if entry:
+            bucket["labelled"] += 1
+            bucket["by_source"][entry["source"]] = bucket["by_source"].get(entry["source"], 0) + 1
+
+    for bucket in out.values():
+        bucket["coverage"] = round(bucket["labelled"] / bucket["library"], 4)
+        bucket["by_source"] = dict(sorted(bucket["by_source"].items(), key=lambda kv: -kv[1]))
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]["library"]))
 
 
 def library_coverage(conn: Any) -> dict[str, Any]:

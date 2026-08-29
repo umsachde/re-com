@@ -135,12 +135,16 @@ def test_the_two_backends_never_share_an_exclusion_set(reload_env):
 # --- the mood tools refuse rather than mislead ------------------------------
 
 
-def test_mood_support_passes_on_youtube(monkeypatch):
-    monkeypatch.setattr(server, "PROVIDER", "youtube")
+@pytest.mark.parametrize("backend", ["youtube", "spotify"])
+def test_mood_support_passes_on_a_backend_with_a_mood_index(monkeypatch, backend):
+    """Spotify joined this list on measured evidence, not on the graph atlas
+    merely existing: 40.2% library mood coverage and a pipeline that returns
+    real mood-ranked tracks. See PLAN.md, "The Spotify mood gate"."""
+    monkeypatch.setattr(server, "PROVIDER", backend)
     server._require_mood_support()  # must not raise
 
 
-@pytest.mark.parametrize("backend", ["spotify", "tidal"])
+@pytest.mark.parametrize("backend", ["tidal"])
 def test_mood_support_refuses_on_other_backends(monkeypatch, backend):
     monkeypatch.setattr(server, "PROVIDER", backend)
     with pytest.raises(RuntimeError) as excinfo:
@@ -158,8 +162,9 @@ def test_mood_support_refuses_on_other_backends(monkeypatch, backend):
 )
 def test_every_mood_tool_is_gated(monkeypatch, tool):
     """Gated before touching the provider or the store -- a wrong-namespace
-    call must never be made at all."""
-    monkeypatch.setattr(server, "PROVIDER", "spotify")
+    call must never be made at all. Checked against a backend with no mood
+    index at all, since Spotify now has one."""
+    monkeypatch.setattr(server, "PROVIDER", "tidal")
 
     def _explode(*a, **k):
         raise AssertionError("the provider must not be reached on a gated backend")
@@ -192,5 +197,10 @@ def test_index_status_names_the_backend_it_describes(monkeypatch, db):
     monkeypatch.setattr(server, "PROVIDER", "spotify")
     status = server.index_status()
     assert status["provider"] == "spotify"
-    assert status["mood_supported"] is False
+    assert status["mood_supported"] is True
     assert "store" in status
+
+
+def test_index_status_reports_a_backend_without_a_mood_index_honestly(monkeypatch, db):
+    monkeypatch.setattr(server, "PROVIDER", "tidal")
+    assert server.index_status()["mood_supported"] is False

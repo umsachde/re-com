@@ -53,7 +53,14 @@ RECENT_LIKES_LIMIT = 100
 # playlists, which no other backend has an equivalent of yet -- Spotify
 # forbids reading other users' playlists outright (measured 403). PLAN.md's
 # v6 section covers the provider-neutral replacement.
-MOOD_PROVIDERS = {"youtube"}
+# Mood needs a mood index for the backend's own catalogue. YouTube has an
+# editorial one (`atlas.py`); every other backend gets one from the neutral
+# graph atlas, which is why this is no longer a YouTube-only feature.
+# Spotify was added 2026-08-29 on measured evidence, not on the graph atlas
+# merely existing: 40.2% library mood coverage (31.2% from `graph_atlas`
+# alone), and a full pipeline returning real, mood-ranked Spotify tracks --
+# see PLAN.md, "The Spotify mood gate".
+MOOD_PROVIDERS = {"youtube", "spotify"}
 
 mcp = MCPServer("re-com" if PROVIDER == "youtube" else f"re-com-{PROVIDER}")
 
@@ -117,6 +124,15 @@ def _require_mood_support() -> None:
 
     Failing loudly with a reason beats handing back results that look fine
     and are entirely wrong.
+
+    v6's graph atlas removed the *index* half of that objection -- measured
+    2026-08-29, a real Spotify library reaches 40.2% mood coverage (31.2% from
+    `graph_atlas` alone), above the YouTube sample's graph-atlas share. The gate
+    stays shut on the *pipeline* half: `recommend.build` calls
+    `signals.gather_seeds` without `graph_conn`, so on a backend whose
+    `capabilities()` are `(none)` the mood path gathers no candidates at all --
+    measured, 0 songs across all 8 quality-check cases. See PLAN.md's "The
+    Spotify mood gate, measured" for what has to land before this opens.
     """
     if PROVIDER not in MOOD_PROVIDERS:
         raise RuntimeError(
@@ -594,7 +610,14 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     playlist = yt.get_playlist(playlist_id, limit=None)
     tracks = [t for t in playlist.get("tracks", []) if t.get("videoId")]
     if not tracks:
-        return []
+        # Was a bare `return []`, which is indistinguishable from "there is
+        # nothing new to recommend from this playlist" -- two very different
+        # things. Measured on Spotify, where the post-Nov-2024 restriction 403s
+        # every playlist read: this returned an empty list in 1.5s and said
+        # nothing about why. Its sibling recommend_from_playlist_for_mood
+        # already raised here; matching it rather than inventing a second
+        # answer to the same question.
+        raise RuntimeError(f"Playlist {playlist_id!r} has no playable tracks to read.")
 
     sample = tracks if len(tracks) <= seed_sample_size else random.sample(tracks, seed_sample_size)
 
@@ -800,6 +823,7 @@ def recommend_for_mood(
     # needing its own cron.
     _s.infer_implicit_feedback(conn)
     exclude = _library_video_ids(yt) | _s.rejected_video_ids(conn)
+    graph_conn = _graph()
 
     result = recommend.build(
         yt, conn, exclude=exclude, feeling=feeling, vector=vector,
@@ -807,6 +831,8 @@ def recommend_for_mood(
         language=language, exclude_languages=exclude_languages,
         allow_unlabelled_language=allow_unlabelled_language,
         bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
+        graph_conn=graph_conn,
+        exclude_index=_library_exclusion_index() if graph_conn else None,
     )
     _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
     return result
@@ -890,6 +916,7 @@ def recommend_from_playlist_for_mood(
         | _s.rejected_video_ids(conn)
         | {t["videoId"] for t in tracks}
     )
+    graph_conn = _graph()
 
     result = recommend.build(
         yt, conn, exclude=exclude, feeling=feeling, vector=vector,
@@ -898,6 +925,8 @@ def recommend_from_playlist_for_mood(
         allow_unlabelled_language=allow_unlabelled_language,
         bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
         seeds=picked["seeds"], resolved=resolved,
+        graph_conn=graph_conn,
+        exclude_index=_library_exclusion_index() if graph_conn else None,
     )
     result["seed_report"] = {
         "playlist_id": playlist_id,
