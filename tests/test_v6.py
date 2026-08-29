@@ -851,3 +851,59 @@ def test_a_joined_credit_is_not_read_one_letter_at_a_time():
     assert match.artist_list(["AP Dhillon"]) == ["AP Dhillon"]
     assert match.artist_list(None) == []
     assert match.artist_list("") == []
+
+
+def test_recommend_from_playlist_survives_a_multi_track_playlist(db, graph_db, monkeypatch):
+    """The shipped-v6 crash, at the tool level.
+
+    `recommend_from_playlist` passes `skip_failures=False`, so the cross-thread
+    graph error did not degrade it -- it propagated. Verified against the
+    shipped v6 merge commit (d0b4fe3) on the real account: every real playlist,
+    including Liked Music, raised ProgrammingError. Two seeds is the whole
+    point of this test; one seed stays on the calling thread and passes either
+    way, which is exactly how this survived v6's smoke tests.
+    """
+    monkeypatch.setattr(graph, "_get", _deezer_for_ap_dhillon())
+    monkeypatch.setattr(server, "_graph", lambda: graph_db)
+    monkeypatch.setattr(server, "_library_video_ids", lambda yt: set())
+    monkeypatch.setattr(server, "_library_exclusion_index", lambda: None)
+
+    fake = _FakeProvider(
+        capabilities=set(),
+        watch={},
+        search_results={"Elevated Shubh": [
+            {"videoId": "yt_elevated", "title": "Elevated", "artists": [{"name": "Shubh"}]}
+        ]},
+        track_meta={
+            "t1": {"videoId": "t1", "title": "Excuses", "artists": [{"name": "AP Dhillon"}]},
+            "t2": {"videoId": "t2", "title": "Excuses", "artists": [{"name": "AP Dhillon"}]},
+        },
+    )
+    fake._playlist = {"tracks": [
+        {"videoId": "t1", "title": "Excuses", "artists": [{"name": "AP Dhillon"}]},
+        {"videoId": "t2", "title": "Excuses", "artists": [{"name": "AP Dhillon"}]},
+    ]}
+    fake.get_playlist = lambda playlistId, limit=None: fake._playlist
+    monkeypatch.setattr(server, "_client", lambda: fake)
+
+    songs = server.recommend_from_playlist("PL1", limit=5)
+    assert songs, "a multi-track playlist must not raise, and must return candidates"
+    assert all(s.get("videoId") for s in songs)
+
+
+def test_recommend_from_playlist_explains_an_unreadable_playlist(monkeypatch):
+    """An unreadable playlist must not look like an exhausted one.
+
+    Spotify's post-Nov-2024 restriction 403s every playlist read, so this
+    returned a bare [] in 1.5s with no reason -- indistinguishable from
+    "nothing new to recommend". `recommend_from_playlist_for_mood` already
+    raised on the same condition.
+    """
+    import pytest
+
+    fake = _FakeProvider()
+    fake.get_playlist = lambda playlistId, limit=None: {"tracks": []}
+    monkeypatch.setattr(server, "_client", lambda: fake)
+
+    with pytest.raises(RuntimeError, match="no playable tracks"):
+        server.recommend_from_playlist("PL1")

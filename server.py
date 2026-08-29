@@ -610,7 +610,14 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     playlist = yt.get_playlist(playlist_id, limit=None)
     tracks = [t for t in playlist.get("tracks", []) if t.get("videoId")]
     if not tracks:
-        return []
+        # Was a bare `return []`, which is indistinguishable from "there is
+        # nothing new to recommend from this playlist" -- two very different
+        # things. Measured on Spotify, where the post-Nov-2024 restriction 403s
+        # every playlist read: this returned an empty list in 1.5s and said
+        # nothing about why. Its sibling recommend_from_playlist_for_mood
+        # already raised here; matching it rather than inventing a second
+        # answer to the same question.
+        raise RuntimeError(f"Playlist {playlist_id!r} has no playable tracks to read.")
 
     sample = tracks if len(tracks) <= seed_sample_size else random.sample(tracks, seed_sample_size)
 
