@@ -514,14 +514,27 @@ editorial atlas) but is now genuinely working rather than empty, which is the ba
 
 **Two bugs found while wiring it, both pre-existing and both silent.**
 
-- **The graph connection could not survive `gather_seeds`' thread pool.** `sqlite3.threadsafety` is 1
-  here: a connection used off its creating thread raises `ProgrammingError`, and `gather_seeds` swallows
-  per-seed exceptions by design. So **every multi-seed request lost its graph candidates without a word**
-  — which means `recommend_from_playlist` has been quietly graph-less on Spotify since v6 shipped, not
-  just the mood path. `recommend_from_song` never showed it because a single seed deliberately stays on
-  the calling thread, which is why v6's headline Spotify measurement looked healthy. Fixed with
+- **The graph connection could not survive `gather_seeds`' thread pool, and this is the most serious
+  thing in this section.** `sqlite3.threadsafety` is 1 here: a connection used off its creating thread
+  raises `ProgrammingError`. Any multi-seed gather with the graph enabled hits it, and what happens next
+  is decided by the caller's `skip_failures`:
+
+  - **`recommend_from_playlist` passes `skip_failures=False`, so it does not degrade — it fails.**
+    Verified by running the shipped v6 merge commit (`d0b4fe3`) in a clean worktree against the real
+    YouTube account: `recommend_from_playlist("LM")` raises `ProgrammingError`. **That tool has been
+    broken on both backends, for any multi-track playlist, since v6 merged.** It was never caught because
+    v6's smoke tests went through `recommend_from_song`.
+  - The mood path swallows per-seed failures by design, so once wired to the graph it would have lost
+    every graph candidate *silently* — the failure this section set out to fix.
+
+  `recommend_from_song` shows neither symptom because a single seed deliberately stays on the calling
+  thread, which is exactly why v6's headline Spotify measurement looked healthy. Fixed with
   `graph_store.for_thread`, a per-thread connection, rather than `check_same_thread=False` — at
   threadsafety 1 that flag disables the check without making concurrent use safe.
+
+  **The lesson worth keeping: a `skip_failures=True` path and a `skip_failures=False` path over the same
+  code hide each other's bugs.** One turns a defect into missing results, the other into a crash, and
+  testing only the forgiving one leaves the strict one broken in production.
 - **A joined credit read one letter at a time, for the third time.** `pick_seeds` returns `artists` as
   the store's joined string, so the graph looked up an artist called `"A"`. Same shape as
   `store._artist_names` ("AP Dhillon" → `"A & P & ..."`) and `taxonomy.as_languages`

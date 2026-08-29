@@ -183,13 +183,18 @@ def for_thread(conn: sqlite3.Connection) -> sqlite3.Connection:
     *connection* is not shareable, and using one off its creating thread raises
     ProgrammingError. `signals.gather_seeds` fans seeds out across a thread
     pool and hands each worker the graph connection, so every graph lookup in a
-    multi-seed request raised -- and `skip_failures` swallowed it, leaving an
-    empty candidate pool and no error. Measured on Spotify, where the graph is
-    the *only* source of candidates: 6 seeds in, 0 candidates out, silently.
+    multi-seed request raised. What that cost depended on the caller:
 
-    `recommend_from_song` never hit this because a single seed deliberately
-    stays on the calling thread, which is why v6's Spotify measurement looked
-    healthy.
+      recommend_from_playlist  skip_failures=False -- the error propagates, so
+                               the tool *fails outright*. Verified against the
+                               shipped v6 commit: broken on both backends for
+                               any multi-track playlist.
+      the mood path            skip_failures=True -- swallowed, leaving an
+                               empty candidate pool and no error at all.
+
+    `recommend_from_song` shows neither, because a single seed deliberately
+    stays on the calling thread -- which is why v6's Spotify measurement looked
+    healthy and this survived to be found later.
 
     Opening a second connection is the right fix rather than
     `check_same_thread=False`: with threadsafety 1 that flag disables the check
