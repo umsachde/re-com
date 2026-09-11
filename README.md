@@ -173,11 +173,15 @@ mean fit 0.848, cross-mood overlap 0.064, 63 distinct songs across 80 slots.
 many independent signals backed each pick (**always against the ceiling** that backend allows, since
 Spotify has no native discovery signals and would otherwise look like a regression), how much of a
 result one artist owns, how much *unrelated* seeds return the same songs, and a native-vs-graph A/B
-that reports what the graph **displaced** as well as what it added.
+reporting **churn** (how much of the top N the graph replaced) alongside the **corroboration delta**
+(whether what replaced it is better agreed-upon). The delta is the one that answers "helping or
+diluting" — churn alone can't, because both arms truncate to the same length.
 
-Pass `--repeat` to get a noise floor in the same run. Two identical runs overlap about 0.79 because
-the upstream APIs vary, so any A/B delta smaller than that is not a result — the flag exists so the
-number is on screen next to the deltas rather than in someone's memory.
+Pass `--repeat` to get a noise floor in the same run, and read every delta against it. The floor is
+not the same on both backends: YouTube measures **0.87** because its radio/related endpoints vary
+between identical calls, while Spotify measures **1.00** — every candidate there comes from the
+locally cached music graph, so there is no upstream variance to absorb. A 5% delta means nothing on
+YouTube and is real on Spotify.
 
 ### Learning without being told
 

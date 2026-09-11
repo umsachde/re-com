@@ -235,6 +235,39 @@ def _graph_only_share(songs) -> float | None:
     return round(graph_only / len(songs), 3)
 
 
+def _ab(with_graph, native, graph_titles, native_titles, native_ceiling) -> dict:
+    """Native-vs-graph, the honest version.
+
+    The first live run killed the metric this started as. "How many native
+    picks did the graph displace" sounds like it answers whether the graph
+    helps, and does not: both arms are truncated to `limit`, so whenever both
+    fill up, displaced == added identically -- it was 37 == 37 across ten
+    YouTube cases. That is arithmetic wearing a finding's clothes.
+
+    What it actually measures is churn, so it is reported once under that name.
+    The question churn cannot answer -- is what came in better than what went
+    out -- needs the corroboration delta: how much agreement backs the picks
+    with the graph on versus off. Positive means the graph is adding songs more
+    signals concur on; negative means it is diluting.
+
+    Read the delta with one caveat: the graph arm has more sources available to
+    agree with each other, so some positive bias is structural. What that bias
+    cannot manufacture is a negative sign, or a collapse on one catalogue while
+    another improves -- which is the shape worth acting on.
+    """
+    native_agreement = _agreement(native, native_ceiling)
+    graph_corroborated = _agreement(with_graph, native_ceiling)["corroborated"]
+    delta = None
+    if graph_corroborated is not None and native_agreement["corroborated"] is not None:
+        delta = round(graph_corroborated - native_agreement["corroborated"], 3)
+    return {
+        "native_n": len(native),
+        "native_agreement": native_agreement,
+        "churn": len(graph_titles - native_titles),
+        "corroboration_delta": delta,
+    }
+
+
 def _pinned_playlist_seeds(yt, count: int = 5):
     """(playlist_id, tracks) for a real library playlist, or None.
 
@@ -308,10 +341,10 @@ def measure_similarity(yt, *, graph_conn=None, limit: int = 10,
                    analogue of cross-mood overlap, and for the same reason the
                    one to watch: high overlap means the engine funnels every
                    seed into the same popular attractor.
-    native vs graph  not just what the graph added but what it DISPLACED --
-                   how many native picks it pushed out of the top `limit`.
-                   "Helping or diluting" is not answerable from a count of
-                   additions alone.
+    native vs graph  churn (how much of the top `limit` the graph replaced) and
+                   the corroboration delta (whether what replaced it is better
+                   agreed-upon). The delta is the one that answers "helping or
+                   diluting" -- see _ab.
 
     `repeat` re-runs each case's graph arm and reports self-overlap. 3 measured
     two identical serial runs overlapping 0.793, so an A/B delta under roughly
@@ -353,12 +386,8 @@ def measure_similarity(yt, *, graph_conn=None, limit: int = 10,
             "agreement": _agreement(with_graph, per_seed_ceiling * len(seed_ids)),
             "concentration": _concentration(with_graph),
             "graph_only_share": _graph_only_share(with_graph),
-            "ab": {
-                "native_n": len(native),
-                "native_agreement": _agreement(native, native_ceiling * len(seed_ids)),
-                "added": len(graph_titles - native_titles),
-                "displaced": len(native_titles - graph_titles),
-            },
+            "ab": _ab(with_graph, native, graph_titles, native_titles,
+                      native_ceiling * len(seed_ids)),
             "titles": sorted(graph_titles),
         }
         if repeat:
@@ -378,6 +407,10 @@ def measure_similarity(yt, *, graph_conn=None, limit: int = 10,
         r["agreement"]["corroborated"] for r in scored if r["agreement"]["corroborated"] is not None
     ]
     floors = [r["self_overlap"] for r in scored if r.get("self_overlap") is not None]
+    deltas = [
+        r["ab"]["corroboration_delta"] for r in scored
+        if r["ab"]["corroboration_delta"] is not None
+    ]
 
     return {
         "provider": server.PROVIDER,
@@ -392,8 +425,8 @@ def measure_similarity(yt, *, graph_conn=None, limit: int = 10,
         "worst_overlaps": pairs[:4],
         "distinct_songs": len(set().union(*sets.values())) if sets else 0,
         "total_slots": sum(len(v) for v in sets.values()),
-        "graph_added": sum(r["ab"]["added"] for r in scored),
-        "graph_displaced": sum(r["ab"]["displaced"] for r in scored),
+        "graph_churn": sum(r["ab"]["churn"] for r in scored),
+        "mean_corroboration_delta": round(statistics.mean(deltas), 3) if deltas else None,
         "noise_floor": round(statistics.mean(floors), 3) if floors else None,
         "cases": rows,
     }
@@ -524,7 +557,10 @@ def main() -> int:
               f"| concentration HHI {result['mean_hhi']} (lower is better)")
         print(f"cross-seed overlap {result['cross_seed_overlap']} (lower is better) "
               f"| {result['distinct_songs']} distinct across {result['total_slots']} slots")
-        print(f"graph added {result['graph_added']}, displaced {result['graph_displaced']} native pick(s)")
+        mean_delta = result["mean_corroboration_delta"]
+        print(f"graph churn {result['graph_churn']} of {result['total_slots']} slots "
+              f"| corroboration delta {'n/a' if mean_delta is None else format(mean_delta, '+')} "
+              f"(graph on vs off; >0 means the graph is adding agreement, not diluting)")
         if result["noise_floor"] is not None:
             print(f"noise floor: identical runs overlap {result['noise_floor']} "
                   f"-- read every delta above against this")
@@ -540,8 +576,10 @@ def main() -> int:
             print(f"  {row['case']:38s} n={row['n']:<3} corrob {agree['corroborated']} "
                   f"(mean {agree['mean']}/{agree['ceiling']}) artists {conc['distinct_artists']} "
                   f"hhi {conc['hhi']} graph-only {row['graph_only_share']} {row['seconds']}s")
+            delta = row["ab"]["corroboration_delta"]
             print(f"       {'':36s} vs native: n={row['ab']['native_n']} "
-                  f"added {row['ab']['added']} displaced {row['ab']['displaced']}"
+                  f"churn {row['ab']['churn']} corrob delta "
+                  f"{'n/a' if delta is None else format(delta, '+')}"
                   + (f" | self-overlap {row['self_overlap']}" if "self_overlap" in row else ""))
             if args.titles:
                 for title in row["titles"]:

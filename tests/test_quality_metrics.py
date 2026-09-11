@@ -72,6 +72,53 @@ def test_empty_results_report_none_rather_than_zero():
     assert quality_check._graph_only_share([]) is None
 
 
+def test_ab_reports_churn_once_because_displacement_was_degenerate():
+    """The first live run killed the metric this replaced. Both arms truncate
+    to `limit`, so when both fill up "added" and "displaced" are the same
+    number by construction -- 37 == 37 across ten YouTube cases, arithmetic
+    reported as a finding. Churn is that number, named honestly and once.
+    """
+    graph = [_song("A", "X", 2, ["radio", "graph_artist"]),
+             _song("NEW", "Y", 2, ["graph_artist", "graph_radio"])]
+    native = [_song("A", "X", 1, ["radio"]), _song("OLD", "Z", 1, ["radio"])]
+    graph_titles, native_titles = quality_check._titles(graph), quality_check._titles(native)
+
+    ab = quality_check._ab(graph, native, graph_titles, native_titles, native_ceiling=3)
+    assert ab["churn"] == 1
+    assert len(graph_titles - native_titles) == len(native_titles - graph_titles)
+    assert "added" not in ab and "displaced" not in ab
+
+
+def test_corroboration_delta_is_what_answers_helping_or_diluting():
+    """Same churn, opposite verdicts: the incoming song is better corroborated
+    in one case and worse in the other. Churn alone cannot tell them apart."""
+    native = [_song("A", "X", 2, ["radio", "artist"]), _song("OLD", "Z", 2, ["radio", "artist"])]
+    native_titles = quality_check._titles(native)
+
+    helped = [_song("A", "X", 2, ["radio", "artist"]),
+              _song("NEW", "Y", 2, ["graph_artist", "graph_radio"])]
+    diluted = [_song("A", "X", 2, ["radio", "artist"]),
+               _song("NEW", "Y", 1, ["graph_artist"])]
+
+    up = quality_check._ab(helped, native, quality_check._titles(helped), native_titles, 3)
+    down = quality_check._ab(diluted, native, quality_check._titles(diluted), native_titles, 3)
+
+    assert up["churn"] == down["churn"] == 1
+    assert up["corroboration_delta"] == 0.0
+    assert down["corroboration_delta"] == -0.5
+
+
+def test_ab_delta_is_none_when_an_arm_returned_nothing():
+    """Spotify's native arm returns nothing at all -- capabilities() is empty,
+    so with the graph off there is no signal to gather. That must read as
+    "not comparable", not as a delta of zero."""
+    graph = [_song("A", "X", 2, ["graph_artist", "graph_radio"])]
+    ab = quality_check._ab(graph, [], quality_check._titles(graph), set(), native_ceiling=0)
+    assert ab["native_n"] == 0
+    assert ab["corroboration_delta"] is None
+    assert ab["churn"] == 1
+
+
 def test_overlap_ignores_empty_sets_and_ranks_worst_first():
     pairs = quality_check._overlap_pairs({
         "a": {"1", "2", "3", "4"},
