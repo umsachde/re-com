@@ -5,8 +5,9 @@ cannot model a real sqlite connection crossing a real thread pool, and that is
 exactly what broke: `recommend_from_playlist` raised ProgrammingError on both
 backends, for any multi-track playlist, from the v6 merge until 2026-08-29.
 507 passing tests did not see it. It survived because the only live smoke test
-(`scripts/test_recommend.py`) went through `recommend_from_song`, which
-deliberately keeps a single seed on the calling thread.
+(`scripts/test_recommend.py`, since removed in favour of this one) went through
+`recommend_from_song`, which deliberately keeps a single seed on the calling
+thread.
 
 So the coverage rule here is tools x backends, not tools. A tool verified on
 YouTube is not verified on Spotify: the two differ in `capabilities()`, which

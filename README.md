@@ -161,11 +161,23 @@ than impression:
 ```bash
 python scripts/quality_check.py --titles
 python scripts/quality_check.py --distinctiveness 0   # A/B the seed scoring
+python scripts/quality_check.py --similarity --repeat # the similarity path
 ```
 
 Watch **cross-mood overlap**, not just mean fit. An early build scored a healthy 0.775 mean fit while
 returning 70% the same songs for "heartbroken" and "angry"; fit alone couldn't see it. Current numbers:
 mean fit 0.848, cross-mood overlap 0.064, 63 distinct songs across 80 slots.
+
+`--similarity` measures the other half of the engine — `recommend_from_song` and
+`recommend_from_playlist`, which had no number at all and were judged by impression. It reports how
+many independent signals backed each pick (**always against the ceiling** that backend allows, since
+Spotify has no native discovery signals and would otherwise look like a regression), how much of a
+result one artist owns, how much *unrelated* seeds return the same songs, and a native-vs-graph A/B
+that reports what the graph **displaced** as well as what it added.
+
+Pass `--repeat` to get a noise floor in the same run. Two identical runs overlap about 0.79 because
+the upstream APIs vary, so any A/B delta smaller than that is not a result — the flag exists so the
+number is on screen next to the deltas rather than in someone's memory.
 
 ### Learning without being told
 
@@ -562,7 +574,7 @@ a single seed on the calling thread. So verification is split three ways:
 | --- | --- | --- |
 | `pytest` | CI, every push | pure logic against fakes — no network, no credentials |
 | `scripts/smoke_all.py` | by hand, before a release | every tool × every backend, against the real account |
-| `scripts/quality_check.py` | by hand, when ranking changes | mood fit, cross-mood overlap, distinctiveness |
+| `scripts/quality_check.py` | by hand, when ranking changes | mood fit, cross-mood overlap, distinctiveness; with `--similarity`, signal agreement, artist concentration, cross-seed overlap and the native-vs-graph A/B |
 
 `tests/test_graph_concurrency.py` is the deliberate exception to "no real resources": it runs a
 **real** graph connection across a **real** thread pool, because that's the one shape a fake
@@ -580,9 +592,6 @@ or states why it didn't, it **excludes** everything already in your library, and
 never as a pass. `record_feedback` is behind `--include-writes` because it writes to your real
 store. `tests/test_smoke_harness.py` unit-tests the harness's own judgement — a smoke test that
 can't fail is worse than none, because it reads as evidence.
-
-`scripts/test_recommend.py` remains as the smallest possible connectivity check: one seed, one
-backend, does `ytmusic-mcp` answer at all.
 
 ## How recommendations are ranked
 

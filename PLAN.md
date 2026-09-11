@@ -401,7 +401,7 @@ split exists because a real defect shipped through the gap between them (§6.1).
 | --- | --- | --- | --- |
 | `pytest` (unit) | CI, every push/PR | pure logic against fakes — normalization, scoring, ranking, exclusion, cache behaviour, arcs, label resolution, error translation, every tool end to end | anything requiring a real connection, a real thread, or a real account |
 | `scripts/smoke_all.py` (live) | by hand, before a release | every tool × every configured backend against the real account | nothing runs it automatically; it needs credentials |
-| `scripts/quality_check.py` | by hand, when ranking changes | mood fit, cross-mood overlap, distinctiveness | whether the tools return at all |
+| `scripts/quality_check.py` | by hand, when ranking changes | mood fit, cross-mood overlap, distinctiveness; with `--similarity`, signal agreement against its ceiling, artist concentration, cross-seed overlap, native-vs-graph displacement, and a measured noise floor | whether the tools return at all |
 
 ### The unit suite
 
@@ -578,15 +578,42 @@ broken one. Fixed by declaring `py-modules` explicitly, with `tests/test_packagi
 keeping the list honest — an undeclared new module imports fine from a checkout and is
 simply missing from an install, which is the quiet half of that failure.
 
-### 7.2 A quality number for the similarity path
+### 7.2 A quality number for the similarity path — *harness built, baseline pending*
 
-`quality_check.py` scores the mood path and the graph. `recommend_from_song` and
-`recommend_from_playlist` — the most-used tools — are judged by impression. §3's own lesson
+`quality_check.py` scored the mood path and the graph. `recommend_from_song` and
+`recommend_from_playlist` — the most-used tools — were judged by impression. §3's own lesson
 (fit alone could not see 70% cross-mood duplication) says that is not good enough.
 
-Proposed: fixed seed cases measuring signal-agreement distribution, artist concentration,
-cross-seed overlap, and a native-vs-graph-only A/B. Without it there is no way to tell
-whether graph candidates are helping or diluting.
+Built as `quality_check.py --similarity`, over the seed lists §3 already splits by
+catalogue, plus one multi-seed playlist case:
+
+- [x] **Signal agreement**, reported against its ceiling. A score counts distinct
+      (seed, source) pairs, so the ceiling is 6 per seed on YouTube and 3 on Spotify
+      (`capabilities()` is empty there, §3) — 30 vs 15 for a five-seed playlist case. A bare
+      mean across backends would have reported arithmetic as a regression.
+- [x] **Artist concentration** (HHI + largest share), measured *before* `max_per_artist`.
+      After the cap it is pinned at 2/`limit` and only confirms the cap works.
+- [x] **Cross-seed overlap** — the direct analogue of cross-mood overlap, and the one to
+      watch for the same reason: it catches every seed funnelling into one popular attractor.
+- [x] **Native-vs-graph A/B** reporting **displacement**, not only additions. "Helping or
+      diluting" is not answerable from a count of what the graph added; what it pushed out
+      of the top `limit` is the other half.
+- [x] `--repeat`, which measures the noise floor **in the same run**. §3 measured two
+      identical serial runs overlapping 0.793, so a delta under ~20% is not a result. Left
+      to memory, that fact is exactly §6.2's mistake waiting to happen.
+- [x] `tests/test_quality_metrics.py` — the metric's own arithmetic, since like the smoke
+      harness this cannot run in CI. Verified by mutation: three deliberate breaks
+      (agreement threshold, graph crediting, the ceiling) each fail a test.
+- [ ] **Run it against both live backends and record the baseline here**, the way §7.1 does.
+      Until that happens this is an instrument that has never been read — and §6.2 is the
+      standing reminder that an unmeasured pipeline can be wrong in ways the parts cannot show.
+
+One thing the build settled that the proposal above did not anticipate: the playlist path had
+to bypass `recommend_from_playlist` and call `gather_seeds` with a **pinned** seed list,
+because the tool samples its seeds with `random.sample`. Two runs that do not share seeds
+cannot be A/B'd at all — the delta would be sampling noise. Measuring it was worth the
+round-trips for §6.1's reason: the single-seed path stays on the calling thread, so it is
+structurally blind to everything the multi-seed path can break.
 
 ### 7.3 A second music graph source
 

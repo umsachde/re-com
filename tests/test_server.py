@@ -2,7 +2,7 @@
 
 Everything here runs against a hand-rolled fake YTMusic client -- no network,
 no headers_auth.json required. This complements (does not replace)
-scripts/test_recommend.py, which is a real-account smoke test.
+scripts/smoke_all.py, which is a real-account smoke test.
 """
 
 import json
