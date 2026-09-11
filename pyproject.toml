@@ -19,6 +19,42 @@ llm = ["anthropic>=0.40"]
 [project.urls]
 Homepage = "https://github.com/umsachde/re-com"
 
+[tool.setuptools]
+# Listed explicitly because this project is a flat layout: 21 modules sitting
+# at the repo root next to scripts/ and tests/. Setuptools' auto-discovery
+# refuses that outright ("Multiple top-level modules discovered in a
+# flat-layout") rather than guessing which of them are the package, so without
+# this `pip install -e .` -- the README's own setup step -- fails on any
+# machine whose setuptools is recent enough to enforce it. Existing installs
+# were unaffected and hid it; CI found it on its first run.
+#
+# Keep in sync when adding a root module. A new module that isn't listed stays
+# importable from the repo (tests put the root on sys.path) but is missing from
+# an installed copy, which is the quiet half of this failure.
+py-modules = [
+    "arc",
+    "atlas",
+    "filters",
+    "graph",
+    "graph_atlas",
+    "graph_store",
+    "judge",
+    "label",
+    "lyrics",
+    "match",
+    "moodspace",
+    "provider",
+    "recommend",
+    "sense",
+    "server",
+    "signals",
+    "spotify_client",
+    "store",
+    "taxonomy",
+    "tempo",
+    "ytmusic_client",
+]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
