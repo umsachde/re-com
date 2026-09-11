@@ -14,7 +14,7 @@ example: `get_watch_playlist`/`get_song_related`/`get_artist` don't exist on
 Spotify's Web API, so `SpotifyClient` builds equivalent responses out of
 Spotify's recommendations/related-artists/artist-top-tracks endpoints. This
 is the "shape spotify-mcp's tools to fit `_gather_seed_candidates`'s
-expectations" option from PLAN.md's v3 notes, chosen over growing a new
+expectations" option from PLAN.md §2.1, chosen over growing a new
 backend-agnostic candidate-generation contract because it keeps every
 existing signal/ranking/mood code path -- and every test covering it --
 completely unchanged.

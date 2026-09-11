@@ -4,9 +4,9 @@ An [MCP](https://modelcontextprotocol.io) server that recommends **new** songs �
 
 It's built to do better than a streaming service's built-in radio/autoplay by pooling multiple independent discovery signals (radio, related content, artist catalog expansion, plus a service-neutral music graph) and ranking candidates by how many of them agree, instead of trusting one black-box algorithm.
 
-**Discovery doesn't depend on any one service's API.** A streaming service can revoke the endpoints a recommender is built on, and Spotify did: for API apps registered after November 2024 without Extended Quota Mode, `/recommendations`, related-artists, artist-top-tracks and audio-features all return 403/404. Two of re-com's three original signals became unbuildable there and `recommend_from_song` returned **zero songs**. So similarity and adjacency now come from a neutral [music graph](#the-music-graph) (Deezer) that belongs to no backend, while the provider supplies only *whose taste this is* — library, history, playlist writes. Native signals are still used wherever they exist and still rank highest; they're just no longer required. See [The music graph](#the-music-graph) and `PLAN.md`'s v6 section.
+**Discovery doesn't depend on any one service's API.** A streaming service can revoke the endpoints a recommender is built on, and Spotify did: for API apps registered after November 2024 without Extended Quota Mode, `/recommendations`, related-artists, artist-top-tracks and audio-features all return 403/404. Two of re-com's three original signals became unbuildable there and `recommend_from_song` returned **zero songs**. So similarity and adjacency now come from a neutral [music graph](#the-music-graph) (Deezer) that belongs to no backend, while the provider supplies only *whose taste this is* — library, history, playlist writes. Native signals are still used wherever they exist and still rank highest; they're just no longer required. See [The music graph](#the-music-graph) and `PLAN.md` §2.3.
 
-**Backends: YouTube Music and Spotify.** re-com is a general recommendation engine, not tied to one service — re-com itself holds **no streaming-service credentials of any kind** for either backend. Every call goes through a sibling `*-mcp` server that re-com spawns as an MCP subprocess and that owns auth entirely: [`ytmusic-mcp`](https://github.com/umsachde/ytmusic-mcp) for YouTube Music, [`spotify-mcp`](https://github.com/umsachde/spotify-mcp) for Spotify. Which one a given re-com instance talks to is set once, at process start, via `RECOM_PROVIDER` — see [Setup](#2-connect-to-a-backend) below. Both are registered as separate MCP server instances (e.g. `re-com` and `re-com-spotify`); a single tool call always stays within one provider. See `provider.py` and `PLAN.md`'s "v3 — Multi-provider support" section for the design.
+**Backends: YouTube Music and Spotify.** re-com is a general recommendation engine, not tied to one service — re-com itself holds **no streaming-service credentials of any kind** for either backend. Every call goes through a sibling `*-mcp` server that re-com spawns as an MCP subprocess and that owns auth entirely: [`ytmusic-mcp`](https://github.com/umsachde/ytmusic-mcp) for YouTube Music, [`spotify-mcp`](https://github.com/umsachde/spotify-mcp) for Spotify. Which one a given re-com instance talks to is set once, at process start, via `RECOM_PROVIDER` — see [Setup](#2-connect-to-a-backend) below. Both are registered as separate MCP server instances (e.g. `re-com` and `re-com-spotify`); a single tool call always stays within one provider. See `provider.py` and `PLAN.md` §2.1, "The provider seam", for the design.
 
 ## Tools
 
@@ -510,7 +510,7 @@ claude mcp add re-com-spotify -s user \
 
 **Two of the three discovery signals are therefore unbuildable on Spotify.** `spotify_client.py` degrades gracefully — a forbidden endpoint is skipped rather than failing the call — but graceful degradation of *every* signal is nothing, and before v6 `recommend_from_song` returned 0 results there. **v6 fixed that**: similarity and adjacency now come from the [music graph](#the-music-graph), which belongs to no backend, and `recommend_from_song` returns a full result set on Spotify (measured: 10 songs, 3.4s warm). Native signals are still preferred wherever the registration allows them — set `RECOM_SPOTIFY_CAPABILITIES` if your app has Extended Quota Mode.
 
-`recommend_for_mood`, `recommend_from_playlist_for_mood` and `read_my_mood` **work on both backends as of 2026-08-29.** They were YouTube-only, because they need a mood index built from the service's own playlists and only YouTube has one; the neutral [graph atlas](#the-music-graph) now supplies that for any backend (measured: 40.2% mood coverage on a real Spotify library, against YouTube's editorial atlas at the same 40%). Wiring the graph into the mood path improved YouTube too — mean mood fit 0.797 → 0.820 and cross-mood overlap 0.121 → 0.096, with warm latency unchanged, since a fully-native result performs zero extra lookups. A backend with neither a native atlas nor graph coverage still **refuses with an explanatory error** rather than returning ids from the wrong namespace. Quality on Spotify is real but below YouTube's (0.201 cross-mood overlap vs 0.096, on a much smaller library); see `PLAN.md`, "The Spotify mood gate". `recommend_from_song`, `recommend_from_playlist`, `songs_by_artist`, `refresh_library`, `record_feedback`, `explain_recommendation` and `index_status` are available on both backends.
+`recommend_for_mood`, `recommend_from_playlist_for_mood` and `read_my_mood` **work on both backends as of 2026-08-29.** They were YouTube-only, because they need a mood index built from the service's own playlists and only YouTube has one; the neutral [graph atlas](#the-music-graph) now supplies that for any backend (measured: 40.2% mood coverage on a real Spotify library, against YouTube's editorial atlas at the same 40%). Wiring the graph into the mood path improved YouTube too — mean mood fit 0.797 → 0.820 and cross-mood overlap 0.121 → 0.096, with warm latency unchanged, since a fully-native result performs zero extra lookups. A backend with neither a native atlas nor graph coverage still **refuses with an explanatory error** rather than returning ids from the wrong namespace. Quality on Spotify is real but below YouTube's (0.201 cross-mood overlap vs 0.096, on a much smaller library); see `PLAN.md` §3, "Quality". `recommend_from_song`, `recommend_from_playlist`, `songs_by_artist`, `refresh_library`, `record_feedback`, `explain_recommendation` and `index_status` are available on both backends.
 
 ---
 
@@ -537,7 +537,7 @@ Check coverage with:
 pytest --cov=server --cov-report=term-missing
 ```
 
-375 tests across the whole project. `tests/test_provider_isolation.py` covers the per-backend split —
+532 tests across the whole project, run in CI on Python 3.10/3.12/3.13 (`.github/workflows/tests.yml`). `tests/test_provider_isolation.py` covers the per-backend split —
 path scoping, the default backend keeping its original filenames (so an existing install isn't orphaned),
 explicit env overrides still winning, and that each mood tool refuses on a foreign backend *before*
 reaching the provider while the v1 tools stay reachable. `tests/test_feedback.py` covers implicit feedback (the
@@ -550,7 +550,39 @@ failure semantics are preserved. `tests/test_v2.py` covers the mood engine — t
 
 `conftest.py` redirects both the library cache and the SQLite store to temp paths for every test, so runs never touch your real data.
 
-`scripts/test_recommend.py` is a separate, complementary smoke test that talks to a real, running `ytmusic-mcp` (see Setup step 2) to sanity-check that the connection and live recommendations actually work.
+### Three layers, because the unit suite structurally can't see everything
+
+A fake client can't model a real SQLite connection crossing a real thread pool — and that's
+what broke: `recommend_from_playlist` raised `ProgrammingError` on **both** backends, for any
+multi-track playlist, from the v6 merge until 2026-08-29. Every test passed the whole time,
+because the only live smoke test went through `recommend_from_song`, which deliberately keeps
+a single seed on the calling thread. So verification is split three ways:
+
+| | Runs | Covers |
+| --- | --- | --- |
+| `pytest` | CI, every push | pure logic against fakes — no network, no credentials |
+| `scripts/smoke_all.py` | by hand, before a release | every tool × every backend, against the real account |
+| `scripts/quality_check.py` | by hand, when ranking changes | mood fit, cross-mood overlap, distinctiveness |
+
+`tests/test_graph_concurrency.py` is the deliberate exception to "no real resources": it runs a
+**real** graph connection across a **real** thread pool, because that's the one shape a fake
+can't reproduce. Its tests were verified by removing the fix and confirming they fail.
+
+```bash
+python scripts/smoke_all.py                      # every configured backend
+python scripts/smoke_all.py --provider spotify   # just one
+```
+
+Each backend runs in its own subprocess (`RECOM_PROVIDER` is read once at import, so one
+process can't honestly test two), and each tool is checked three ways: it **returns** something
+or states why it didn't, it **excludes** everything already in your library, and it finishes
+**within** a latency ceiling. A backend with no command configured is reported as `skipped`,
+never as a pass. `record_feedback` is behind `--include-writes` because it writes to your real
+store. `tests/test_smoke_harness.py` unit-tests the harness's own judgement — a smoke test that
+can't fail is worse than none, because it reads as evidence.
+
+`scripts/test_recommend.py` remains as the smallest possible connectivity check: one seed, one
+backend, does `ytmusic-mcp` answer at all.
 
 ## How recommendations are ranked
 
