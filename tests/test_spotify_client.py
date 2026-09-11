@@ -105,9 +105,39 @@ def test_search_artists_filter():
 # --- get_library_playlists / get_playlist -------------------------------
 
 
-def test_get_library_playlists():
-    yt = _client({"get_playlists": [{"id": "p1", "name": "My Playlist"}]})
+def test_get_library_playlists_keeps_only_the_users_own():
+    # Spotify returns followed playlists alongside owned ones, distinguishable
+    # only by owner.id. Returning someone else's breaks two things: reading its
+    # tracks 403s, and the exclusion set silently skips what it cannot read.
+    yt = _client({
+        "get_current_user": {"id": "me"},
+        "get_playlists": [
+            {"id": "p1", "name": "My Playlist", "owner": {"id": "me"}},
+            {"id": "p2", "name": "Someone Else's", "owner": {"id": "stranger"}},
+        ],
+    })
     assert yt.get_library_playlists() == [{"playlistId": "p1", "title": "My Playlist"}]
+
+
+def test_the_identity_lookup_happens_once_not_per_listing():
+    calls = []
+    yt = _client({
+        "get_current_user": lambda **kw: calls.append(1) or {"id": "me"},
+        "get_playlists": [{"id": "p1", "name": "Mine", "owner": {"id": "me"}}],
+    })
+    yt.get_library_playlists()
+    yt.get_library_playlists()
+    assert len(calls) == 1
+
+
+def test_an_unavailable_identity_keeps_every_playlist():
+    # Failing to learn who you are must not empty the library -- that would
+    # void the exclusion set rather than merely narrowing it.
+    yt = _client({
+        "get_current_user": SpotifyMCPError("down"),
+        "get_playlists": [{"id": "p1", "name": "Mine", "owner": {"id": "me"}}],
+    })
+    assert yt.get_library_playlists() == [{"playlistId": "p1", "title": "Mine"}]
 
 
 def test_get_playlist_lm_routes_to_saved_tracks():
@@ -231,9 +261,67 @@ def test_get_artist_degrades_gracefully_on_failures():
     yt = _client({
         "get_artist_top_tracks": SpotifyMCPError("down"),
         "get_related_artists": SpotifyMCPError("down"),
+        "get_artist_albums": SpotifyMCPError("down"),
     })
     result = yt.get_artist("artist1")
     assert result == {"songs": {"browseId": None, "results": []}, "related": {"results": []}}
+
+
+def test_the_album_walk_supplies_a_catalog_when_top_tracks_is_forbidden():
+    # The measured case: on an app without Extended Quota Mode top tracks 403s,
+    # and songs_by_artist returned 0 songs with no explanation at all.
+    yt = _client({
+        "get_artist_top_tracks": SpotifyMCPError("403 Forbidden"),
+        "get_related_artists": SpotifyMCPError("403 Forbidden"),
+        "get_artist_albums": [{"id": "al1", "name": "Discovery"}],
+        "get_album_tracks": [
+            {"id": "t1", "name": "One More Time", "artists": [{"name": "Daft Punk"}]},
+            {"id": "t2", "name": "Aerodynamic", "artists": [{"name": "Daft Punk"}]},
+        ],
+    })
+    songs = yt.get_artist("artist1")["songs"]["results"]
+    assert [s["title"] for s in songs] == ["One More Time", "Aerodynamic"]
+    # Album track objects carry no album of their own; without attaching it,
+    # two different recordings of one title collapse into a single identity.
+    assert songs[0]["album"] == {"name": "Discovery"}
+
+
+def test_top_tracks_wins_when_it_is_allowed():
+    # The album walk costs 1 + N calls, so it stays a fallback rather than
+    # becoming the default on an app that still has the cheap endpoint.
+    yt = _client({
+        "get_artist_top_tracks": [{"id": "t9", "name": "Top Song", "artists": []}],
+        "get_related_artists": [],
+    })
+    songs = yt.get_artist("artist1")["songs"]["results"]
+    assert [s["title"] for s in songs] == ["Top Song"]
+
+
+def test_one_unreadable_album_does_not_lose_the_rest_of_the_catalog():
+    def album_tracks(album_id, limit=None):
+        if album_id == "bad":
+            raise SpotifyMCPError("gone")
+        return [{"id": "t1", "name": "Good Song", "artists": []}]
+
+    yt = _client({
+        "get_artist_top_tracks": SpotifyMCPError("403"),
+        "get_related_artists": [],
+        "get_artist_albums": [{"id": "bad", "name": "Bad"}, {"id": "ok", "name": "OK"}],
+        "get_album_tracks": album_tracks,
+    })
+    songs = yt.get_artist("artist1")["songs"]["results"]
+    assert [s["title"] for s in songs] == ["Good Song"]
+
+
+def test_a_track_on_two_releases_is_returned_once():
+    yt = _client({
+        "get_artist_top_tracks": SpotifyMCPError("403"),
+        "get_related_artists": [],
+        "get_artist_albums": [{"id": "single", "name": "Single"}, {"id": "lp", "name": "LP"}],
+        "get_album_tracks": [{"id": "t1", "name": "Same Song", "artists": []}],
+    })
+    songs = yt.get_artist("artist1")["songs"]["results"]
+    assert len(songs) == 1
 
 
 # --- get_history -------------------------------------------------------

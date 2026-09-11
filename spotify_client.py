@@ -68,6 +68,12 @@ _CALL_TIMEOUT = 60
 # which is a separate expansion step inside the "artist" signal -- this
 # client doesn't reach into signals.py's internals.
 _RELATED_ARTISTS_FOR_SIGNAL = 5
+# Bounds the album walk in `_catalog_from_albums`. A prolific artist has
+# hundreds of releases and every one costs a call; `songs_by_artist` asks for
+# 10-20 songs, so walking the most recent 50 albums is already far more
+# catalog than any caller consumes.
+_ALBUMS_TO_WALK = 50
+_TRACKS_PER_ALBUM = 50
 
 CONFIG_HELP = (
     "spotify-mcp is not configured. Set RECOM_SPOTIFY_MCP_COMMAND (its interpreter) "
@@ -123,6 +129,10 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
+# Distinguishes "identity not fetched yet" from "identity unavailable".
+_UNKNOWN_USER = "<unknown>"
+
+
 class SpotifyClient:
     """Synchronous facade over a persistent spotify-mcp subprocess.
 
@@ -131,6 +141,10 @@ class SpotifyClient:
     session needs; every public method blocks the caller's thread on the
     result.
     """
+
+    # Class-level default so an instance built without __init__ (tests do
+    # this to skip the subprocess) still has a defined identity state.
+    _user_id: str | None = _UNKNOWN_USER
 
     def __init__(self, command: str | None = None, args: list[str] | None = None):
         command = command or os.environ.get("RECOM_SPOTIFY_MCP_COMMAND")
@@ -147,6 +161,10 @@ class SpotifyClient:
         self._thread.start()
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
+        # Sentinel rather than None, so "not looked up yet" is distinguishable
+        # from "looked up and genuinely unavailable" -- otherwise a failed
+        # lookup would be retried on every playlist listing.
+        self._user_id = _UNKNOWN_USER
 
         fut = asyncio.run_coroutine_threadsafe(self._connect(), self._loop)
         try:
@@ -244,8 +262,49 @@ class SpotifyClient:
             return [_artist_from_spotify(a) for a in raw]
         return [_track_from_spotify(t) for t in raw]
 
+    def _current_user_id(self) -> str | None:
+        """The authenticated user's Spotify id, fetched once per process.
+
+        None means "could not be determined", and every caller treats that as
+        "don't filter" rather than "filter everything out" -- an identity
+        lookup failing must not empty the library.
+        """
+        if self._user_id is _UNKNOWN_USER:
+            try:
+                self._user_id = (self._call("get_current_user") or {}).get("id")
+            except SpotifyMCPError:
+                self._user_id = None
+        return self._user_id
+
     def get_library_playlists(self, limit: int | None = 25) -> list[dict[str, Any]]:
+        """The user's *own* playlists, not the ones they merely follow.
+
+        Spotify's `current_user_playlists` returns both, and they are
+        indistinguishable except by `owner.id`. Returning followed playlists
+        broke two things at once, both measured on a real account where 4 of 8
+        library playlists belonged to other users:
+
+          recommend_from_playlist  403s on `playlist_items` for someone else's
+                                   playlist -- an error the caller cannot act
+                                   on, since it is not their playlist to fix.
+          the exclusion set        `_build_library_video_ids` skips a playlist
+                                   it cannot read, so those tracks silently
+                                   were not excluded while `refresh_library`
+                                   reported a confident total.
+
+        The second is the reason this filters rather than catching the 403:
+        the novelty guarantee has to be built from playlists that can actually
+        be read, and a playlist the user follows is not one of "your playlists"
+        in any sense they would recognise -- they did not put those songs
+        anywhere.
+
+        YouTube Music needs no equivalent: `get_library_playlists` there
+        returns only the user's own.
+        """
         raw = self._call("get_playlists", limit=limit)
+        user_id = self._current_user_id()
+        if user_id:
+            raw = [p for p in raw if (p.get("owner") or {}).get("id") == user_id]
         return [{"playlistId": p.get("id"), "title": p.get("name")} for p in raw]
 
     def get_playlist(self, playlistId: str, limit: int | None = 100) -> dict[str, Any]:
@@ -308,6 +367,51 @@ class SpotifyClient:
             contents.extend(_track_from_spotify(t) for t in top)
         return [{"contents": contents}]
 
+    def _catalog_from_albums(self, artist_id: str) -> list[dict[str, Any]]:
+        """The artist's real catalog, walked album by album.
+
+        `artist_top_tracks` 403s for apps registered after Nov 2024 without
+        Extended Quota Mode, and caps at ~10 even when allowed. Albums and
+        their tracks are not restricted, so this is the only route to a full
+        catalog that such an app has -- measured on a real registration,
+        `songs_by_artist("Daft Punk")` returned 0 songs before this and a full
+        result set after.
+
+        Album track objects carry no `album` key of their own, so the album
+        is attached here: `match`/`store` use it for song identity, and a
+        missing album makes two different recordings of the same title look
+        like one.
+        """
+        try:
+            albums = self._call("get_artist_albums", artist_id=artist_id, limit=_ALBUMS_TO_WALK)
+        except SpotifyMCPError:
+            return []
+
+        tracks: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for album in albums:
+            album_id = album.get("id")
+            if not album_id:
+                continue
+            try:
+                raw = self._call("get_album_tracks", album_id=album_id, limit=_TRACKS_PER_ALBUM)
+            except SpotifyMCPError:
+                # One unreadable album must not lose the rest of the catalog.
+                continue
+            for item in raw:
+                track = _track_from_spotify(item)
+                track_id = track.get("videoId")
+                if not track_id or track_id in seen:
+                    continue
+                # A single and its album release are different track ids for
+                # the same recording; dedup by id here, and let the caller's
+                # variant collapsing handle same-title-different-id.
+                seen.add(track_id)
+                if album.get("name"):
+                    track["album"] = {"name": album["name"]}
+                tracks.append(track)
+        return tracks
+
     def get_artist(self, channelId: str) -> dict[str, Any]:
         try:
             top = self._call("get_artist_top_tracks", artist_id=channelId)
@@ -317,12 +421,20 @@ class SpotifyClient:
             related = self._call("get_related_artists", artist_id=channelId)
         except SpotifyMCPError:
             related = []
+
+        songs = [_track_from_spotify(t) for t in top]
+        if not songs:
+            # Only when top tracks gave nothing: the endpoint is cheaper (one
+            # call, popularity-ordered) and ranks better when it is allowed.
+            # Walking albums costs 1 + N calls, so it is the fallback rather
+            # than the default.
+            songs = self._catalog_from_albums(channelId)
+
         return {
-            # No browseId: Spotify has no separate "full catalog" playlist to
-            # follow the way YouTube Music's channel "Songs" browseId does --
-            # top tracks (capped ~10 by Spotify) is the deepest available, so
-            # server._artist_song_catalog falls back to "results" directly.
-            "songs": {"browseId": None, "results": [_track_from_spotify(t) for t in top]},
+            # No browseId: Spotify has no single "full catalog" playlist to
+            # follow the way YouTube Music's channel "Songs" browseId does, so
+            # server._artist_song_catalog reads "results" directly.
+            "songs": {"browseId": None, "results": songs},
             "related": {"results": [{"browseId": a["id"]} for a in related if a.get("id")]},
         }
 
