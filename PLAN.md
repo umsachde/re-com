@@ -346,13 +346,29 @@ The graph cache is the deliberate exception: *"Excuses — AP Dhillon is Deezer 
 1508646682"* is equally true on every backend. Scoping it per provider would resolve every
 artist twice and grow a third copy on the next service.
 
-### 4.11 Concurrency is capped, not unbounded
+### 4.11 "Your playlists" means playlists you own
+
+*Rejected: treat everything `get_library_playlists` returns as the user's own.* Spotify's
+`current_user_playlists` returns playlists the user follows alongside ones they created,
+distinguishable only by `owner.id` — measured on a real account, 4 of 8 library playlists
+belonged to other users. Reading a followed playlist's tracks 403s (it isn't yours to read
+that way), and the exclusion builder was catching that failure and silently skipping the
+playlist, which meant those tracks were never excluded while `refresh_library()` reported a
+confident total.
+
+Filtering to owned playlists is the fix, not catching the 403 more gracefully: a playlist
+you follow is not one of "your playlists" in any sense you would recognise — you did not put
+those songs there — so it should not be read for exclusion or seeded from at all. YouTube
+Music needs no equivalent filter; `get_library_playlists` there already returns only the
+user's own.
+
+### 4.12 Concurrency is capped, not unbounded
 
 Six seeds × ~4 round-trips is fine; a playlist-seeded mood request can carry 20 seeds, and
 20 × 4 simultaneous in-flight requests is exactly the rate-limit exposure worth avoiding.
 `RECOM_SEED_WORKERS` (default 6) bounds it.
 
-### 4.12 Learning without being asked
+### 4.13 Learning without being asked
 
 `record_feedback` only fires when someone remembers to call it, which in practice is almost
 never. Two tables already kept — `recommendation` (what was served) and `history_log` (what
@@ -519,10 +535,9 @@ Dead candidates are dropped and the arc re-sequenced, up to `_RESOLVE_ROUNDS`.
 
 ## 7. Roadmap
 
-Ranked by what the project actually needs, not by size. Item 1 is in progress; the rest are
-open.
+Ranked by what the project actually needs, not by size. Item 1 is done; the rest are open.
 
-### 7.1 Verification across tools × backends — *in progress*
+### 7.1 Verification across tools × backends — *done*
 
 The gap §6.1 shipped through. Three parts:
 
@@ -715,4 +730,13 @@ and fixed the thread-safety defect (§6.1) and the third instance of the joined-
 
 **2026-09-10 — verification.** §5's three-layer split, after auditing why §6.1 could ship:
 the real-connection concurrency tests, the live cross-backend smoke harness, tests for the
-harness itself, and CI.
+harness itself, and CI. CI's first run found the project had been uninstallable on any
+recent setuptools (§7.1's notes) — fixed by declaring `py-modules` explicitly. The harness's
+own first live run found what it was built to find: two silent Spotify defects §5's
+unit-only suite could not see. `spotify-mcp` was reading a playlist row's track under the
+wrong key for every row on this account, so every Spotify playlist read back empty and the
+exclusion guarantee silently covered Liked Songs only; and `songs_by_artist` returned
+nothing with no explanation once `artist_top_tracks` was restricted (§6.6). Also filtered
+Spotify's playlist listing to playlists the user owns, closing a second, related gap the
+same live run surfaced. Both fixed and re-verified live on both backends before merging;
+§7.1 carries the baseline.
