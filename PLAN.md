@@ -401,7 +401,7 @@ split exists because a real defect shipped through the gap between them (§6.1).
 | --- | --- | --- | --- |
 | `pytest` (unit) | CI, every push/PR | pure logic against fakes — normalization, scoring, ranking, exclusion, cache behaviour, arcs, label resolution, error translation, every tool end to end | anything requiring a real connection, a real thread, or a real account |
 | `scripts/smoke_all.py` (live) | by hand, before a release | every tool × every configured backend against the real account | nothing runs it automatically; it needs credentials |
-| `scripts/quality_check.py` | by hand, when ranking changes | mood fit, cross-mood overlap, distinctiveness | whether the tools return at all |
+| `scripts/quality_check.py` | by hand, when ranking changes | mood fit, cross-mood overlap, distinctiveness; with `--similarity`, signal agreement against its ceiling, artist concentration, cross-seed overlap, native-vs-graph displacement, and a measured noise floor | whether the tools return at all |
 
 ### The unit suite
 
@@ -578,15 +578,85 @@ broken one. Fixed by declaring `py-modules` explicitly, with `tests/test_packagi
 keeping the list honest — an undeclared new module imports fine from a checkout and is
 simply missing from an install, which is the quiet half of that failure.
 
-### 7.2 A quality number for the similarity path
+### 7.2 A quality number for the similarity path — *done*
 
-`quality_check.py` scores the mood path and the graph. `recommend_from_song` and
-`recommend_from_playlist` — the most-used tools — are judged by impression. §3's own lesson
+`quality_check.py` scored the mood path and the graph. `recommend_from_song` and
+`recommend_from_playlist` — the most-used tools — were judged by impression. §3's own lesson
 (fit alone could not see 70% cross-mood duplication) says that is not good enough.
 
-Proposed: fixed seed cases measuring signal-agreement distribution, artist concentration,
-cross-seed overlap, and a native-vs-graph-only A/B. Without it there is no way to tell
-whether graph candidates are helping or diluting.
+Built as `quality_check.py --similarity`, over the seed lists §3 already splits by
+catalogue, plus one multi-seed playlist case:
+
+- [x] **Signal agreement**, reported against its ceiling. A score counts distinct
+      (seed, source) pairs, so the ceiling is 6 per seed on YouTube and 3 on Spotify
+      (`capabilities()` is empty there, §3) — 30 vs 15 for a five-seed playlist case. A bare
+      mean across backends would have reported arithmetic as a regression.
+- [x] **Artist concentration** (HHI + largest share), measured *before* `max_per_artist`.
+      After the cap it is pinned at 2/`limit` and only confirms the cap works.
+- [x] **Cross-seed overlap** — the direct analogue of cross-mood overlap, and the one to
+      watch for the same reason: it catches every seed funnelling into one popular attractor.
+- [x] **Native-vs-graph A/B** reporting **churn** and the **corroboration delta**. This
+      started as "how many native picks did the graph displace", which the first live run
+      killed: both arms truncate to `limit`, so whenever both fill up, displaced == added
+      identically — 37 == 37 across ten YouTube cases. Arithmetic wearing a finding's
+      clothes, and §6.5's lesson landing again. Churn is that number named honestly; the
+      delta is what actually answers helping-or-diluting.
+- [x] `--repeat`, which measures the noise floor **in the same run**. §3 measured two
+      identical serial runs overlapping 0.793, so a delta under ~20% is not a result. Left
+      to memory, that fact is exactly §6.2's mistake waiting to happen.
+- [x] `tests/test_quality_metrics.py` — the metric's own arithmetic, since like the smoke
+      harness this cannot run in CI. Verified by mutation: three deliberate breaks
+      (agreement threshold, graph crediting, the ceiling) each fail a test.
+- [x] **Run it against both live backends and record the baseline** (below).
+
+**Baseline, 2026-09-10.** Warm, `limit=10`, ten cases (nine single-seed, one five-seed
+playlist), 100 slots per backend.
+
+| | YouTube | Spotify |
+| --- | --- | --- |
+| agreement ceiling | 6 / seed | 3 / seed |
+| corroborated (picks >1 pair agreed on) | **0.47** | **0.13** |
+| artist concentration (HHI, lower better) | 0.224 | 0.272 |
+| cross-seed overlap (lower better) | 0.042 | 0.044 |
+| distinct songs / slots | 82 / 100 | 80 / 100 |
+| graph churn | 35 / 100 | 100 / 100 |
+| corroboration delta (graph on vs off) | **+0.09** | n/a — no native arm exists |
+| **noise floor (identical runs overlap)** | **0.87** | **1.00** |
+
+Four things this says that were not known before.
+
+**The noise floor is not a property of the project, it is a property of the backend.** §3
+recorded 0.793 and it has been quoted since as though it were universal. YouTube measures
+0.87 here; Spotify measures **1.00** — bit-identical results across repeated runs, because
+every candidate comes from the locally cached graph and nothing upstream varies. So a 5%
+A/B delta is noise on YouTube and a real result on Spotify. Any future comparison has to
+say which backend it was measured on.
+
+**The graph helps, and helps most exactly where it was argued it would.** The +0.09 overall
+delta is within YouTube's own noise, but the per-case split is not random: Channa Mereya
++0.4 and Kesariya +0.3 against As It Was −0.1 and Brown Munde −0.1. The Arijit Singh and
+Sidhu Moose Wala cases are the catalogue §3 measured English-centric sources under-serving,
+and they are where the graph contributes most. §4.3's argument survives its first real test.
+
+**Spotify's real quality gap is corroboration, not coverage.** It returns a full, distinct,
+well-spread result set — 80 distinct songs, concentration and cross-seed overlap both on par
+with YouTube. But 0.13 corroborated means **87% of its picks rest on a single signal**, so
+ranking there is barely ranking. That is the number §7.3 exists to move, and it is now the
+strongest argument for sequencing a second graph source next: a second independent source is
+the only thing that can create agreement on a backend with no native signals at all.
+
+**Artist-centric similarity is quantified at last.** §2.3 stated the cost — Deezer has no
+track-level radio, so graph similarity works through artists — without a number. Two seeds by
+the same artist overlap 90% on Spotify (Excuses/Brown Munde, Channa Mereya/Kesariya) versus
+60%/50% on YouTube, where per-track radio pulls them apart. On a graph-only backend,
+seeding from a different song by the same artist returns nearly the same playlist.
+
+One thing the build settled that the proposal above did not anticipate: the playlist path had
+to bypass `recommend_from_playlist` and call `gather_seeds` with a **pinned** seed list,
+because the tool samples its seeds with `random.sample`. Two runs that do not share seeds
+cannot be A/B'd at all — the delta would be sampling noise. Measuring it was worth the
+round-trips for §6.1's reason: the single-seed path stays on the calling thread, so it is
+structurally blind to everything the multi-seed path can break.
 
 ### 7.3 A second music graph source
 
@@ -597,6 +667,14 @@ unauthenticated, contract-free and under no obligation to anyone.
 Proposed: a second source behind the same `graph.py` seam — MusicBrainz/ListenBrainz is the
 obvious pick (open data, real similarity, no key) — so "the graph" becomes plural the way
 "signals" already is. This is the most on-brand item on the list.
+
+**§7.2's baseline turned this from on-brand into load-bearing.** Two measurements, both new:
+87% of Spotify's picks rest on a single signal, because with no native signals there is
+nothing for the graph to agree *with* — one source cannot corroborate itself, so the ranking
+that is supposed to be agreement-based is barely ranking there. And same-artist seeds return
+90% the same songs on that backend, because one artist-centric source is the only thing
+shaping the result. A second independent source is the only fix for either; neither is
+reachable by improving Deezer coverage. This should be next.
 
 ### 7.4 Continuous indexing
 
@@ -740,3 +818,15 @@ nothing with no explanation once `artist_top_tracks` was restricted (§6.6). Als
 Spotify's playlist listing to playlists the user owns, closing a second, related gap the
 same live run surfaced. Both fixed and re-verified live on both backends before merging;
 §7.1 carries the baseline.
+
+**2026-09-10 — a number for the similarity path.** §7.2 closed: `quality_check.py
+--similarity` scores `recommend_from_song` and `recommend_from_playlist` on signal
+agreement (against a per-backend ceiling), artist concentration, cross-seed overlap and a
+native-vs-graph A/B, with the noise floor measured in the same run. §6.5 landed again on
+the first live run, which killed the A/B metric as originally designed — "displacement"
+turned out to equal "additions" identically, because both arms truncate to `limit`;
+replaced by churn plus a corroboration delta. The baseline it then produced moved §7.3 up
+the list: 87% of Spotify's picks rest on a single signal, and same-artist seeds return 90%
+the same songs there, neither of which more Deezer coverage can fix. It also corrected a
+number this document had been quoting as universal — the 0.793 noise floor is YouTube's;
+Spotify's is 1.00, because nothing upstream of the cached graph varies.
