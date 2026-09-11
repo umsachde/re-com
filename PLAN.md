@@ -491,7 +491,18 @@ The gap §6.1 shipped through. Three parts:
 - [x] `tests/test_smoke_harness.py` — the harness's own judgement, so it cannot rot into
       always-passing.
 - [x] `.github/workflows/tests.yml` — CI on 3.10 / 3.12 / 3.13.
+- [x] `tests/test_packaging.py` — the flat-layout module list, enforced in both
+      directions.
 - [ ] Run `smoke_all.py` against both live backends and record the baseline numbers here.
+
+**CI found a real defect on its first run, and not the kind that was being looked for.**
+`pip install -e .` — the README's own setup step — failed outright: setuptools refuses
+auto-discovery on a flat layout with 21 root modules, so the project had been uninstallable
+on any recent setuptools. Nobody saw it because *existing* installs were unaffected and the
+repo's own `.venv` predated the enforcement. Same shape as §6.1: the working path hid the
+broken one. Fixed by declaring `py-modules` explicitly, with `tests/test_packaging.py`
+keeping the list honest — an undeclared new module imports fine from a checkout and is
+simply missing from an install, which is the quiet half of that failure.
 
 ### 7.2 A quality number for the similarity path
 
