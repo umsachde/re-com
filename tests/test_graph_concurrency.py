@@ -81,11 +81,21 @@ def test_for_thread_is_a_no_op_on_the_creating_thread(graph_db):
 
 
 def test_each_thread_gets_its_own_connection_and_reuses_it(graph_db):
+    # A barrier, not just three submitted tasks: ThreadPoolExecutor.map does
+    # not guarantee three OS threads actually run concurrently -- if the first
+    # finishes before the second is scheduled, the pool can hand it the next
+    # item and only one thread is ever observed. Measured: exactly this
+    # flaked in CI's coverage job (extra instrumentation overhead skews the
+    # race) while the plain pytest job happened to pass. A barrier can only
+    # clear once all three are genuinely in flight, the same technique
+    # tests/test_concurrency.py already uses for the same reason.
+    barrier = threading.Barrier(3, timeout=5)
     seen = {}
 
     def record():
         ident = threading.get_ident()
         first = graph_store.for_thread(graph_db)
+        barrier.wait()
         second = graph_store.for_thread(graph_db)
         assert first is second, "a thread must not reopen on every lookup"
         seen[ident] = id(first)
