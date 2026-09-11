@@ -12,3 +12,8 @@ oauth.json
 raw_headers.txt
 .env
 .coverage
+
+# build artifacts
+build/
+dist/
+*.whl
