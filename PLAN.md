@@ -466,7 +466,48 @@ of song identity.
 latter subclasses the former, the clearer branch was dead code. Found by writing a test for
 it, not by reading it.
 
-### 6.5 Resolution failures must re-sequence, not append
+### 6.5 The first live run of a test is part of writing it
+
+`smoke_all.py`'s first real run reported 4 failures on Spotify. Two were genuine and
+serious (§6.6). The other two were the harness being wrong: it marked `read_my_mood`
+FAILED for correctly saying it had no labelled plays to read a mood from, and
+`recommend_from_playlist_for_mood` FAILED for correctly refusing to seed from tracks that
+did not fit. Both are behaviours the README promises; the harness had encoded "returned
+something" as the contract instead of "returned something *or said why not*".
+
+It also picked an empty playlist to seed from, because Spotify reports no track count and
+the harness trusted it, then reported the resulting correct error as a regression.
+
+A harness that cries wolf gets ignored exactly when it is right, so these are not cosmetic.
+Each is now a unit test in `tests/test_smoke_harness.py`.
+
+### 6.6 A shape assumption held for one payload and not the other
+
+Two defects found by the first live cross-backend run, both silent, both in `spotify-mcp`.
+
+**Every Spotify playlist read returned zero tracks.** Spotify returns two payloads for a
+playlist row: the documented one puts the track object under `track`; the one this account
+receives puts it under `item` and uses `track` as a *boolean* flag meaning "this is a track,
+not an episode". Reading `it["track"]` yielded a bool or None for every row, so the filter
+dropped all of them — a playlist reporting `total=20` returned 0 tracks.
+
+That voided the guarantee this project exists for, on one backend, invisibly: the exclusion
+set is built from those rows, so it covered saved tracks only and every song in every
+Spotify playlist could be handed back as "new". Measured after the fix: the exclusion set
+went from 328 to **454** tracks, and `recommend_from_playlist` went from unusable to working.
+
+**`songs_by_artist` returned nothing, and said nothing.** `artist_top_tracks` 403s on a
+restricted registration, leaving an empty catalogue and a result of `found: 0` with no note
+— which reads as "your library already has them all". The album walk (`artist_albums` →
+`album_tracks`) is the route that survives, and it needed its own measurement: that endpoint
+rejects any page size above 10 on this registration ("400 Invalid limit" at 20, 49 and 50),
+while `album_tracks` and `current_user_playlists` accept 50 on the same app. The cap is
+per-endpoint, so only the one that has it pays for smaller pages.
+
+Both had been shipping since Spotify support was added. Neither is visible from unit tests,
+because a fake returns the shape the fake's author expected.
+
+### 6.7 Resolution failures must re-sequence, not append
 
 On the mood path, resolution happens *after* sequencing — the sequencer has already chosen
 the songs, so that is the smallest set needing provider ids. But a candidate that fails to
@@ -493,7 +534,25 @@ The gap §6.1 shipped through. Three parts:
 - [x] `.github/workflows/tests.yml` — CI on 3.10 / 3.12 / 3.13.
 - [x] `tests/test_packaging.py` — the flat-layout module list, enforced in both
       directions.
-- [ ] Run `smoke_all.py` against both live backends and record the baseline numbers here.
+- [x] Run `smoke_all.py` against both live backends and record the baseline (below).
+
+**Baseline, 2026-09-10.** Warm, `limit=10`, graph on. Every tool passes on both backends.
+
+| | YouTube | Spotify |
+| --- | --- | --- |
+| exclusion set | 1,963 tracks / 18.0s | 454 tracks / 4.6s |
+| `recommend_from_song` | 5.2s | 3.3s |
+| `recommend_from_playlist` | 15.1s | 6.3s |
+| `songs_by_artist` | 2.9s | 7.1s |
+| `recommend_for_mood` | 8.4s | 4.0s |
+| `recommend_from_playlist_for_mood` | 26.7s | refused, explained |
+| `read_my_mood` | 2.2s | no mood, explained |
+
+Two things this corrects in the older numbers above. §3's "~4-6s warm" held only
+for `recommend_from_song`; the playlist-seeded mood path is **26.7s** on YouTube, four
+times what the docs implied. And the exclusion-set rebuild is 18s, not the 0.9s quoted
+there — that figure is a *cache hit*, which is the common path but not what
+`refresh_library()` pays.
 
 **CI found a real defect on its first run, and not the kind that was being looked for.**
 `pip install -e .` — the README's own setup step — failed outright: setuptools refuses

@@ -153,3 +153,80 @@ def test_skipped_checks_are_reported_and_do_not_fail_the_run(capsys):
     ]}
     assert smoke_all.report([run]) == 0
     assert "1 skipped" in capsys.readouterr().out
+
+
+# --- read_my_mood's contract ------------------------------------------------
+
+
+def test_a_mood_read_with_a_vector_and_evidence_passes():
+    check = smoke_all._check_mood_read(
+        _check(), {"vector": {"valence": 0.4}, "evidence": ["on repeat"], "described": "upbeat"}
+    )
+    assert check.status == smoke_all.PASS
+    assert check.detail == "upbeat"
+
+
+def test_a_mood_read_with_no_vector_but_a_reason_passes():
+    # Regression on the harness itself: the first live run marked Spotify's
+    # read_my_mood FAILED for correctly saying it had no labelled plays to read
+    # a mood from. Stated degradation is the contract, not a defect.
+    check = smoke_all._check_mood_read(
+        _check(), {"vector": None, "evidence": ["25 recent plays, none labelled yet"]}
+    )
+    assert check.status == smoke_all.PASS
+    assert "none labelled yet" in check.detail
+
+
+def test_a_mood_asserted_with_no_evidence_fails():
+    # The tool's own docstring: lead with the evidence, never assert a verdict
+    # without it.
+    check = smoke_all._check_mood_read(_check(), {"vector": {"valence": 0.9}, "evidence": []})
+    assert check.status == smoke_all.FAIL
+
+
+def test_a_mood_read_that_says_nothing_at_all_fails():
+    check = smoke_all._check_mood_read(_check(), {"vector": None, "evidence": []})
+    assert check.status == smoke_all.FAIL
+
+
+# --- a documented refusal is not a break ------------------------------------
+
+
+def test_a_tools_documented_refusal_passes():
+    # "No track in this playlist fits that mood ... Try recommend_for_mood" is
+    # the contract the README promises over returning off-mood filler. The
+    # first live run marked it FAILED.
+    checks = []
+    smoke_all._run(
+        "recommend_from_playlist_for_mood",
+        lambda: (_ for _ in ()).throw(RuntimeError(
+            "No track in this playlist fits that mood well enough to seed from "
+            "(20 considered). Try recommend_for_mood to draw on the whole library."
+        )),
+        checks,
+    )
+    assert checks[0].status == smoke_all.PASS
+    assert "refused, explained" in checks[0].detail
+
+
+def test_a_real_crash_in_the_same_tool_still_fails():
+    # The refusal rule must not swallow genuine breakage in that tool.
+    checks = []
+    smoke_all._run(
+        "recommend_from_playlist_for_mood",
+        lambda: (_ for _ in ()).throw(RuntimeError("ProgrammingError: SQLite objects created in a thread")),
+        checks,
+    )
+    assert checks[0].status == smoke_all.FAIL
+
+
+def test_another_tool_may_not_refuse_by_contract():
+    # recommend_from_song has no documented refusal; an error there is a break
+    # even if it happens to mention another tool.
+    checks = []
+    smoke_all._run(
+        "recommend_from_song",
+        lambda: (_ for _ in ()).throw(RuntimeError("broke. Try recommend_for_mood")),
+        checks,
+    )
+    assert checks[0].status == smoke_all.FAIL

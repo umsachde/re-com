@@ -142,8 +142,55 @@ def _check(check, result, excluded, budget, *, allow_empty_if=None, out=None):
     return check
 
 
+def _check_mood_read(check, result):
+    """read_my_mood's contract: lead with the evidence, never assert a mood
+    without it.
+
+    A read with no vector is not a failure so long as it says why -- measured
+    on Spotify, "25 recent plays, but none of them have a mood label yet" is
+    exactly what this tool should say rather than inventing a mood. The first
+    live run marked that FAILED, which was the harness being wrong, not the
+    tool. Same rule as the empty-but-explained shortfall above.
+    """
+    evidence = result.get("evidence") or []
+    if result.get("vector") and evidence:
+        check.status = PASS
+        check.detail = result.get("described") or "mood read with evidence"
+    elif evidence:
+        check.status = PASS
+        check.detail = f"no mood, explained: {str(evidence[0])[:110]}"
+    else:
+        # A verdict with no evidence behind it is the thing this tool's own
+        # docstring says not to do.
+        check.status = FAIL
+        check.detail = f"asserted a mood with no evidence: {result}"
+    return check
+
+
+# A tool that cannot satisfy a request says so by raising, and re-com's third
+# hard requirement is that such a refusal state its reason. Two of these tools
+# refuse by contract rather than by failing, and both name the tool to use
+# instead -- that is the signature the harness keys on, because a genuine crash
+# never suggests an alternative.
+_REFUSES_BY_CONTRACT = {
+    "recommend_from_playlist_for_mood",
+    "recommend_for_mood",
+}
+
+
+def _is_stated_refusal(name, message):
+    """Whether a raised error is this tool's documented refusal, not a break."""
+    return name in _REFUSES_BY_CONTRACT and "Try recommend" in message
+
+
 def _run(name, fn, checks):
-    """Time one tool call, and turn a raised error into a failed check."""
+    """Time one tool call, and turn a raised error into a failed check.
+
+    Except a refusal the tool documents: "no track in this playlist fits that
+    mood, try recommend_for_mood instead" is the behaviour the README promises
+    over returning off-mood filler, and marking it FAILED is the harness crying
+    wolf -- which gets it ignored exactly when it is right.
+    """
     check = Check(name)
     checks.append(check)
     started = time.monotonic()
@@ -151,8 +198,13 @@ def _run(name, fn, checks):
         result = fn()
     except Exception as e:  # noqa: BLE001 - a crashing tool is a failed check
         check.seconds = time.monotonic() - started
-        check.status = FAIL
-        check.detail = f"{type(e).__name__}: {e}"
+        message = str(e)
+        if _is_stated_refusal(name, message):
+            check.status = PASS
+            check.detail = f"refused, explained: {message[:110]}"
+        else:
+            check.status = FAIL
+            check.detail = f"{type(e).__name__}: {message}"
         return None
     check.seconds = time.monotonic() - started
     return result
@@ -249,15 +301,7 @@ def run_one_backend(budget, limit, include_writes):
 
         result = _run("read_my_mood", server.read_my_mood, checks)
         if result is not None:
-            check = checks[-1]
-            if result.get("vector") and result.get("evidence"):
-                check.status = PASS
-                check.detail = result.get("described") or "mood read with evidence"
-            else:
-                # A mood with no evidence behind it is the thing this tool's
-                # own docstring says not to do.
-                check.status = FAIL
-                check.detail = f"no vector or no evidence: {result}"
+            _check_mood_read(checks[-1], result)
 
     # --- reporting tools ----------------------------------------------------
 
@@ -296,19 +340,37 @@ def run_one_backend(budget, limit, include_writes):
 
 
 def _multi_track_playlist(yt):
-    """A library playlist with at least two tracks, or None.
+    """A library playlist with at least two readable tracks, or None.
 
     Two is the whole point: `gather_seeds` keeps a single seed on the calling
-    thread, so a one-track playlist exercises none of the threading.
+    thread, so a one-track playlist exercises none of the threading -- the bug
+    this script exists to catch would slip straight through.
+
+    The count has to be verified by reading, not trusted: Spotify reports no
+    `count` at all, so trusting it picked the first playlist in the listing,
+    which on this account was an empty test playlist. The tool then failed with
+    "no playable tracks", which is correct behaviour being reported as a
+    regression -- a harness that cries wolf gets ignored exactly when it is
+    right.
     """
     try:
         playlists = yt.get_library_playlists(limit=25)
     except Exception:  # noqa: BLE001 - reported by the caller as a skip
         return None
+
     for pl in playlists or []:
+        playlist_id = pl.get("playlistId")
+        if not playlist_id:
+            continue
         count = pl.get("count")
-        if count is None or int(count) >= 2:
-            return pl.get("playlistId")
+        if count is not None and int(count) < 2:
+            continue
+        try:
+            tracks = (yt.get_playlist(playlist_id, limit=5) or {}).get("tracks") or []
+        except Exception:  # noqa: BLE001 - unreadable is simply not a candidate
+            continue
+        if len([t for t in tracks if t.get("videoId")]) >= 2:
+            return playlist_id
     return None
 
 
