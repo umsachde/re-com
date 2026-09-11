@@ -80,7 +80,7 @@ def main() -> int:
 def _claude_pass(conn, yt, cap: int | None) -> None:
     if not judge.available():
         print("    unavailable: install with `pip install -e '.[llm]'` and run `ant auth login`.")
-        print("    Without it, the non-English catalogue stays largely unlabelled — see PLAN_V2.md.")
+        print("    Without it, the non-English catalogue stays largely unlabelled — see PLAN.md's coverage table.")
         return
 
     library = store.library_video_ids(conn)

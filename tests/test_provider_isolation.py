@@ -139,7 +139,7 @@ def test_the_two_backends_never_share_an_exclusion_set(reload_env):
 def test_mood_support_passes_on_a_backend_with_a_mood_index(monkeypatch, backend):
     """Spotify joined this list on measured evidence, not on the graph atlas
     merely existing: 40.2% library mood coverage and a pipeline that returns
-    real mood-ranked tracks. See PLAN.md, "The Spotify mood gate"."""
+    real mood-ranked tracks. See PLAN.md §3, "Quality"."""
     monkeypatch.setattr(server, "PROVIDER", backend)
     server._require_mood_support()  # must not raise
 

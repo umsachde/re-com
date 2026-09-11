@@ -4,7 +4,7 @@ v1 needed no storage -- every tool call rebuilt what it needed from the API.
 v2 can't work that way: the mood atlas is ~180k rows crawled over half an hour,
 and mood labels are expensive enough that they must be computed once and kept.
 
-Layout note: PLAN_V2.md sketches a nested `recom/` package. This project
+Layout note: an early plan sketched a nested `recom/` package. This project
 is currently flat (server.py at the root), so v2 modules stay flat too rather
 than mixing conventions mid-build. The v1 library-exclusion cache deliberately
 stays as its own JSON file (see server.py) -- it works, it's tested, and

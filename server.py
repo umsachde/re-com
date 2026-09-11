@@ -8,7 +8,7 @@ or "spotify") and reached entirely through a sibling `*-mcp` server
 (ytmusic-mcp / spotify-mcp -- see ytmusic_client.py / spotify_client.py) --
 re-com holds no streaming-service credentials of its own for either backend.
 See provider.py for the shared interface both backends implement, and
-PLAN.md for the v3 multi-provider design notes.
+PLAN.md §2.1, "The provider seam", for the design notes.
 """
 
 import functools
@@ -49,17 +49,15 @@ CACHE_TTL = int(os.environ.get("RECOM_CACHE_TTL", 6 * 60 * 60))
 # ytmusic-mcp/ytmusicapi pages this, so the real count returned is typically ~2x.
 RECENT_LIKES_LIMIT = 100
 
-# The v2 mood engine depends on atlas.py's crawl of YouTube's own mood
-# playlists, which no other backend has an equivalent of yet -- Spotify
-# forbids reading other users' playlists outright (measured 403). PLAN.md's
-# v6 section covers the provider-neutral replacement.
 # Mood needs a mood index for the backend's own catalogue. YouTube has an
-# editorial one (`atlas.py`); every other backend gets one from the neutral
-# graph atlas, which is why this is no longer a YouTube-only feature.
+# editorial one (`atlas.py`); no other backend does -- Spotify forbids reading
+# other users' playlists outright (measured 403) -- so every other backend gets
+# one from the neutral graph atlas instead. That is why mood is no longer a
+# YouTube-only feature; see PLAN.md §2.3, "The music graph".
 # Spotify was added 2026-08-29 on measured evidence, not on the graph atlas
 # merely existing: 40.2% library mood coverage (31.2% from `graph_atlas`
 # alone), and a full pipeline returning real, mood-ranked Spotify tracks --
-# see PLAN.md, "The Spotify mood gate".
+# see PLAN.md §3, "Quality".
 MOOD_PROVIDERS = {"youtube", "spotify"}
 
 mcp = MCPServer("re-com" if PROVIDER == "youtube" else f"re-com-{PROVIDER}")
@@ -125,23 +123,30 @@ def _require_mood_support() -> None:
     Failing loudly with a reason beats handing back results that look fine
     and are entirely wrong.
 
-    v6's graph atlas removed the *index* half of that objection -- measured
-    2026-08-29, a real Spotify library reaches 40.2% mood coverage (31.2% from
-    `graph_atlas` alone), above the YouTube sample's graph-atlas share. The gate
-    stays shut on the *pipeline* half: `recommend.build` calls
-    `signals.gather_seeds` without `graph_conn`, so on a backend whose
-    `capabilities()` are `(none)` the mood path gathers no candidates at all --
-    measured, 0 songs across all 8 quality-check cases. See PLAN.md's "The
-    Spotify mood gate, measured" for what has to land before this opens.
+    v6 opened this to Spotify on 2026-08-29, in two halves and in that order.
+    The *index* half: the graph atlas gives a backend with no editorial
+    taxonomy its own mood coverage (measured, a real Spotify library: 40.2%
+    overall, 31.2% from `graph_atlas` alone). The *pipeline* half, which the
+    coverage number could not speak for: `recommend.build` was calling
+    `signals.gather_seeds` without `graph_conn`, so a backend whose
+    `capabilities()` are `(none)` gathered no candidates at all -- measured,
+    0 songs across all 8 quality-check cases, which would have shipped had the
+    gate been opened on coverage alone. Both are now done and both measured;
+    see PLAN.md §6.2, and §3 for the numbers.
+
+    The gate itself stays, for the next backend: `MOOD_PROVIDERS` is a list of
+    backends whose mood pipeline has actually been measured, not a list of
+    backends that might work.
     """
     if PROVIDER not in MOOD_PROVIDERS:
+        supported = ", ".join(sorted(MOOD_PROVIDERS))
         raise RuntimeError(
             f"Mood-based recommendation isn't available on the {PROVIDER!r} backend yet. "
-            "It needs a mood index built from that service's own playlists, and only "
-            f"YouTube Music has one so far ({PROVIDER} doesn't expose the playlist data "
-            "it would take to build). Use recommend_from_song, recommend_from_playlist "
-            f"or songs_by_artist on {PROVIDER}, or the 're-com' (YouTube Music) server "
-            "for mood. See PLAN.md's v6 section for the provider-neutral replacement."
+            "It needs a mood index, and one that's been measured end to end rather than "
+            f"assumed -- so far that's {supported}. Use recommend_from_song, "
+            f"recommend_from_playlist or songs_by_artist on {PROVIDER}, or one of those "
+            "backends for mood. See PLAN.md §2.3, 'The music graph', for how a new "
+            "backend gets a mood index without the service having its own."
         )
 
 

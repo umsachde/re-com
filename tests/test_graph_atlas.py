@@ -231,7 +231,7 @@ def test_propagation_skips_a_track_with_no_title(db, graph_db, monkeypatch):
 
 
 def test_the_native_atlas_still_outranks_the_neutral_one(db):
-    """Best available source wins outright -- the rule PLAN_V2 already used.
+    """Best available source wins outright -- the rule PLAN.md's mood-layer table sets.
 
     YouTube's own taxonomy is stronger evidence than a playlist title, so where
     both exist the native reading must win.
