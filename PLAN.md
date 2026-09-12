@@ -658,7 +658,7 @@ cannot be A/B'd at all — the delta would be sampling noise. Measuring it was w
 round-trips for §6.1's reason: the single-seed path stays on the calling thread, so it is
 structurally blind to everything the multi-seed path can break.
 
-### 7.3 A second music graph source
+### 7.3 A second music graph source — *done*
 
 Deezer is now a single point of failure, and §4.3's argument condemns exactly that: building
 discovery on one service's endpoints is how you get 403'd into nothing. Deezer is keyless,
@@ -675,6 +675,68 @@ that is supposed to be agreement-based is barely ranking there. And same-artist 
 90% the same songs on that backend, because one artist-centric source is the only thing
 shaping the result. A second independent source is the only fix for either; neither is
 reachable by improving Deezer coverage. This should be next.
+
+**Shipped 2026-09-11 as `brainz.py`, but not the way this section proposed it.**
+The section called MusicBrainz/ListenBrainz "the obvious pick" while `graph.py`'s
+own header recorded it as probed and *rejected* — empty `similar-recordings` for
+all six test tracks, 12-19s per call. Both were partly right. The rejection
+tested a **track**-level endpoint, and the graph here is artist-centric by
+`graph.py`'s own argument; the v1 `similar-recordings` path now 404s outright.
+Re-probed against the labs API's `similar-artists` instead:
+
+| seed | latency | neighbours | top names |
+|---|---|---|---|
+| AP Dhillon | 0.5s | 33 | Gurinder Gill, Shubh, Diljit Dosanjh |
+| Diljit Dosanjh | 0.6s | 100 | Sidhu Moose Wala, Harrdy Sandhu |
+| Arijit Singh | 0.7s | 100 | Shreya Ghoshal, Atif Aslam, KK |
+| The Weeknd | 0.8s | 100 | Daft Punk, Kendrick Lamar |
+
+**Independence is the only thing that justified adding it, so it was measured
+first.** Against Deezer's related-artists over eight seeds: overall Jaccard
+**0.137**. On the Punjabi core, ListenBrainz corroborates 12-15 of Deezer's 20
+(~60-65%) while adding 393 new artists across the eight — Manni Sandhu, Prem
+Dhillon, Sunny Malton, Harnoor, KK, Sunidhi Chauhan, A. R. Rahman. Enough
+agreement to be evidence, enough disagreement to be information. Live, candidate
+pools grew 30-50% (62→80 on a Punjabi seed) and warm re-runs cost 0.00s.
+
+**Three things this deliberately does not claim.**
+
+- **Deezer is still a single point of failure for the *catalogue*.** ListenBrainz
+  returns artists, never tracks, so every neighbour crosses back into
+  `graph.artist_tracks`. This makes adjacency plural; the section's framing
+  ("Deezer is now a single point of failure") is narrowed, not closed.
+- **Coverage is partial.** Dua Lipa returns zero neighbours. A seed ListenBrainz
+  cannot answer for degrades to Deezer-only silently, and must.
+- **The 0.137 is flattered by size asymmetry** — ListenBrainz returns up to 100,
+  Deezer a fixed 20. At matched depth the agreement would read higher.
+
+**The live run found two defects the unit suite could not, which is §5's whole
+argument again.** First, a MusicBrainz 503 — and it 503s readily at 1 req/sec —
+was being cached as `no_match`, so one transient rate-limit permanently poisoned
+an artist, indistinguishably from a real miss. It had already silently emptied
+Arijit Singh. Fixed by making "could not ask" a distinct outcome from "asked,
+the answer was no"; only the latter is cacheable. Second, the adjacency seed was
+the *Deezer-resolved* artist name, and Deezer credits "Kesariya" to Pritam, its
+composer, where the providers credit Arijit Singh, who sings it — so the lookup
+returned neighbours unrelated to the seed (Tanzanian bongo flava for a Bollywood
+track). Indian film music makes the composer-vs-performer split the common case,
+not an edge one, so `neighbours` now takes the provider's own credit. Both are
+pinned by tests.
+
+`scripts/quality_check.py`'s `GRAPH_SOURCES` went to four alongside this. That
+matters for honesty rather than bookkeeping: had the ceiling stayed at three
+while a fourth source started contributing, the 87% single-signal number would
+have improved partly by arithmetic and the measurement would be flattering
+itself. **The re-measured baseline is still owed** — see §7.10.
+
+**§7.10 has since run, and it contradicts this section's central claim.** The sentence above
+— "a second independent source is the only fix for either" — is wrong on both counts. It is
+not a fix for the same-artist-seed defect at all (90% before, 90% after: both sources are
+artist-centric, so they cannot separate two seeds sharing an artist), and it barely moved the
+single-signal defect (0.13 → 0.16). The error is visible in this section's own reasoning:
+it justified the source on measured *independence* and then expected *corroboration*, which
+are opposites. Independent sources name different artists, and their tracks arrive as new
+single-source candidates rather than as second votes. Read §7.10 before citing anything here.
 
 ### 7.4 Continuous indexing
 
@@ -771,6 +833,110 @@ gap, before deciding whether Trakt is worth a second OAuth integration just for 
 - The offline maintenance scripts still authenticate directly with their own
   `headers_auth.json` rather than going through `ytmusic-mcp`. Deliberate — they are bulk
   indexing jobs, not part of the live path — but it means two unrelated credentials exist.
+- §7.3 added a MusicBrainz lookup at 1.2s throttled per *artist* to the live path. Cached
+  permanently and only on a cold artist, but it belongs in `scripts/maintain.py` (§7.4) as a
+  warm-ahead job rather than being paid in a user's first request for that artist.
+
+### 7.10 Re-baseline after the second source — *done, and it mostly did not work*
+
+Run live on both backends, 2026-09-11, warm, `limit=10`, same ten cases as §7.2. The second
+source is confirmed live (16 artists resolved through MusicBrainz, 910 adjacency rows, 11
+ListenBrainz fetches cached), so this measures the thing and not its absence.
+
+Numbers below are **after** §7.11, which fixed a real regression this run exposed. The
+intermediate figures are kept in §7.11 rather than here, so this table is the shipped state.
+
+| | YouTube 7.2 → 7.3 | Spotify 7.2 → 7.3 |
+| --- | --- | --- |
+| agreement ceiling | 6 → 7 / seed | 3 → 4 / seed |
+| **corroborated** | 0.47 → **0.52** | 0.13 → **0.16** |
+| concentration (HHI) | 0.224 → **0.214** | 0.272 → **0.238** |
+| cross-seed overlap | 0.042 → **0.033** | 0.044 → **0.060** |
+| distinct / slots | 82/100 → **85/100** | 80/100 → 75/100 |
+| corroboration delta | +0.09 → **+0.10** | n/a |
+| **same-artist seed overlap** | 60%/50% → **50%/40%** | 90%/90% → **90%/90%** |
+| noise floor | 0.87 → 0.87 | 1.00 → 1.00 |
+
+**The headline defect barely moved, and the reason is a mistake in §7.3's own argument.**
+Spotify's corroboration went 0.13 → 0.16: real rather than noise, since that backend's floor
+is 1.00, but it means 87% single-signal became 84%. §7.3 justified the second source on
+measured *independence* (Jaccard 0.137) and then expected *corroboration* from it. Those are
+opposites. Corroboration requires two sources to name the **same track**; independence means
+they name different artists, whose tracks enter the pool as fresh single-source candidates.
+The very number that justified the work is the number that predicted it would not deliver
+this. The gains appear exactly where the two sources *overlap* — the Punjabi/Bollywood core,
+where ListenBrainz confirms 60-65% of Deezer's neighbours: Kesariya 0.4, Excuses 0.3, Channa
+Mereya 0.3, Brown Munde 0.2, against 0.0-0.1 on every western seed. That is a coherent
+finding, just not the one that was predicted.
+
+**The same-artist-seed defect did not move at all: 90% before, 90% after.** §7.3 asserted "a
+second independent source is the only fix for either". It is not a fix for this one, and the
+reason is structural rather than a matter of degree: *both* sources are artist-centric, so
+seeding two songs by one artist produces that artist's neighbour set either way. No number of
+additional artist-centric sources can separate two seeds that share an artist. Only a
+genuine **track**-level similarity signal can — the thing `graph.py`'s header says Deezer
+does not have, and the thing ListenBrainz's `similar-recordings` was supposed to be before it
+turned out to 404. This defect is therefore still open and is now understood to need a
+different kind of source, not one more of the same kind.
+
+**One cost survives the §7.11 fix, and is stated rather than buried.** Spotify's cross-seed
+overlap got *worse* (0.044 → 0.060) and distinct songs fell (80 → 75): more candidates drawn
+from overlapping neighbourhoods pull different seeds slightly closer together. On a backend
+whose noise floor is 1.00 that is a real movement, not sampling. So on Spotify the second
+source trades a little breadth for a little corroboration — a defensible trade, but a trade,
+and not the free win §7.3 implied.
+
+**What did improve, honestly.** YouTube: corroboration 0.47 → 0.52, concentration 0.224 →
+0.214, cross-seed overlap 0.042 → 0.033, distinct songs 82 → 85, same-artist overlap 60%/50%
+→ 50%/40%. Spotify: concentration 0.272 → 0.238. Results are more varied and less clustered
+on both. Worth having; still not what §7.3 was for.
+
+### 7.11 YouTube's lost slots — *done*
+
+§7.10 found YouTube filling 91 of 100 slots where §7.2 filled 100. A second candidate source
+must never *reduce* the songs returned, so this was chased first: unlike a quality number, it
+costs a user actual results.
+
+**The hypothesis in this section's first draft was wrong.** It guessed
+truncate-then-resolve; `resolve_candidates` already resolves in rank order and walks on past
+a failure. Traced live instead, which named it immediately:
+
+    Excuses — AP Dhillon:  pool_in=16  graph_in=9  dropped=7  → returned 8
+
+**The pool and the search budget were the same number, and should never have been.**
+`resolve_pool_size` served as both how deep the ranked pool goes *and* how many provider
+searches are allowed. Its 1.6x was sized when graph candidates were a minority of the top of
+the pool; a native candidate always has a provider id, a graph candidate needs a search that
+can fail. §7.3's fourth source shifted that mix, the drop rate rose past 1.6x, and the pool
+had nothing left to backfill from. `server.py` already *claimed* the right design — "the pool
+stays deep for native candidates while the searching stays bounded" — but only did it on the
+filtering path. Split into `backfill_pool_size` (4x, local, free) and `max_resolve`
+(unchanged, the network cost). Both callers fixed; searches per request did not rise.
+
+**The fix exposed a second, quieter defect: the note had started lying.** `dropped` counted
+every unresolved candidate, including ones below the search budget that were never looked up
+at all — so the user was told 20 songs "couldn't be matched" when 7 had been tried and 13
+were untouched pool tail. Invisible while the two budgets were one number, and a deeper pool
+turned it into a misleading message. `dropped` now counts only attempted candidates.
+
+**And a third, found while re-measuring: the harness was not measuring the shipped path.**
+`quality_check.py` carried its own copy of the pool sizing, so after the server was fixed it
+still reported 92/100 — a short result the real tool no longer returned. This is §5's whole
+argument turned on the verification layer itself: a harness that duplicates the logic it
+measures will eventually measure something that does not ship. Now aligned, and the fully
+restored run reads 100/100 slots with 85 distinct songs, above §7.2's 82.
+
+### 7.12 Find a track-level similarity signal
+
+§7.10 established that the 90% same-artist-seed overlap cannot be fixed by any
+artist-centric source, and both of re-com's are artist-centric. This needs a signal that
+distinguishes two songs by one artist. Candidates worth probing, cheapest first: Deezer's
+`/track/{id}/radio` (recorded absent in `graph.py`, worth re-probing on the same grounds
+ListenBrainz was), ListenBrainz's `similar-recordings` under a **valid** algorithm name (the
+labs endpoint rejected the one tried, with an enumeration error that implies a discoverable
+list), and last.fm's `track.getSimilar`, which is track-level by design but needs a key.
+Probe before proposing: §7.3's lesson is that the shape of the endpoint matters more than
+the reputation of the service.
 
 ---
 
@@ -830,3 +996,40 @@ the list: 87% of Spotify's picks rest on a single signal, and same-artist seeds 
 the same songs there, neither of which more Deezer coverage can fix. It also corrected a
 number this document had been quoting as universal — the 0.793 noise floor is YouTube's;
 Spotify's is 1.00, because nothing upstream of the cached graph varies.
+
+**2026-09-11 — the graph becomes plural.** §7.3 closed: `brainz.py` adds ListenBrainz
+`similar-artists` as a second adjacency source behind MusicBrainz identity, tagged
+`graph_related_lb` so a track both sources surface reads as agreement through the
+`sources` set `signals._merge_and_score` already counts — the single-signal fix is the tag,
+not new scoring. Reversed §7.3's own premise twice over: the "obvious pick" had already been
+rejected in `graph.py`'s header, and that rejection had tested a track-level endpoint for an
+artist-centric graph. Measured independent before being wired in (Jaccard 0.137 against
+Deezer over eight seeds), which is the only thing that justified a second source at all.
+The first live run found two defects, both now pinned by tests: a MusicBrainz 503 cached as
+a permanent `no_match` — it had already silently emptied Arijit Singh — and the adjacency
+seed taken from Deezer's credit, which names "Kesariya"'s composer rather than its singer
+and returned unrelated neighbours. Also gave `graph.resolve_artist` the cache it always
+needed, which stopped being optional once every ListenBrainz neighbour had to cross back
+into Deezer by name. Deezer is still the catalogue; only adjacency is plural.
+
+**2026-09-11 — the re-baseline, and a negative result.** §7.10: the second source did not do
+what §7.3 built it for. Spotify's single-signal share went 87% → 84%, and the 90%
+same-artist-seed overlap did not move at all. The cause is an error in §7.3's reasoning
+rather than in the implementation — it justified the source on *independence* and expected
+*corroboration*, which are opposites, and no artist-centric source can separate two seeds
+that share an artist. What the source does deliver is variety: YouTube cross-seed overlap
+0.042 → 0.029, same-artist 60/50% → 50/40%, Spotify concentration 0.272 → 0.24. Two costs
+recorded rather than buried: Spotify's cross-seed overlap worsened (0.044 → 0.060) and
+YouTube lost nine filled slots. The still-open defect gets §7.12: it needs a **track**-level
+signal, a different kind of source rather than one more of the same kind.
+
+**2026-09-11 — the lost slots, and two defects behind them.** §7.11: the ranked pool's depth
+and the provider-search budget were one number, and §7.3's fourth source shifted the
+native/graph mix far enough past the 1.6x buffer that `recommend_from_song` returned 8 songs
+instead of 10. Split into `backfill_pool_size` (local, free) and `max_resolve` (the network
+cost, unchanged) — the design `server.py` already described but only applied on the filtering
+path. Two quieter defects fell out of it: `dropped` had been counting never-searched pool tail
+as "couldn't be matched", telling the user 20 failures where 7 were real; and
+`quality_check.py` carried its own copy of the pool sizing, so it went on reporting a short
+result the fixed server no longer produced — §5's argument turned on the verification layer
+itself. YouTube now fills 100/100 with 85 distinct songs, against §7.2's 82.

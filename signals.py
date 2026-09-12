@@ -19,7 +19,8 @@ those three are unbuildable: `/recommendations` 404s and `artist_related_artists
 gated:
 
   native   radio / related / artist   -- gated on `provider.capabilities()`
-  graph    graph_artist / graph_radio / graph_related -- always available
+  graph    graph_artist / graph_radio / graph_related (Deezer) and
+           graph_related_lb (ListenBrainz) -- always available
 
 The graph signals come from Deezer (`graph.py`), belong to no provider, and
 cannot be revoked by one. They are artist-centric because Deezer has no
@@ -255,6 +256,7 @@ def _add_graph_candidates(
         seed,
         related_to_expand=_GRAPH_RELATED_TO_EXPAND,
         per_artist=_GRAPH_TRACKS_PER_ARTIST,
+        brainz_artist=primary,
     ):
         key = f"{GRAPH_KEY_PREFIX}{row['id']}"
         if key not in found:
@@ -527,6 +529,14 @@ def resolve_candidates(
     substituted -- the same partial-results philosophy as a failed signal.
     Native candidates already have ids and pass through untouched.
 
+    **`dropped` counts only candidates actually attempted.** A graph candidate
+    below the search budget was never looked up, so reporting it as "couldn't be
+    matched" states something untrue about a song nobody asked about. That
+    distinction was invisible while the pool and the search budget were the same
+    number; separating them (`backfill_pool_size`, PLAN.md 7.11) made the pool
+    tail large enough that conflating the two turned a correct note into a
+    misleading one -- 7 genuine failures became a reported 20.
+
     `max_resolve` caps how many provider searches this may perform. The
     language and tempo filters need a pool ~12x the requested limit, because
     they drop a great deal -- fine when candidates are free, but every graph
@@ -551,6 +561,7 @@ def resolve_candidates(
         index += len(window)
 
         pending = [s for s in window if not s.get("videoId")][:max(0, budget)]
+        attempted = {id(s) for s in pending}
         if pending:
             budget -= len(pending)
             workers = max_workers or min(len(pending), max(1, SEED_WORKERS))
@@ -560,7 +571,13 @@ def resolve_candidates(
 
         for song in window:
             vid = song.get("videoId")
-            if not vid or vid in exclude:
+            if not vid:
+                # Only a candidate we actually searched for is a failure. One
+                # below the budget is untouched pool tail; see the docstring.
+                if id(song) in attempted:
+                    dropped += 1
+                continue
+            if vid in exclude:
                 dropped += 1
                 continue
             song.pop("graphRef", None)
@@ -579,3 +596,27 @@ RESOLVE_BUFFER = 1.6
 
 def resolve_pool_size(limit: int) -> int:
     return max(limit + 5, int(limit * RESOLVE_BUFFER))
+
+
+# How deep the *ranked* pool goes, as opposed to how many provider searches are
+# allowed. These were the same number until PLAN.md 7.11, and conflating them
+# was a latent bug that a fourth graph source exposed.
+#
+# `RESOLVE_BUFFER`'s 1.6x was sized when graph candidates were a minority of the
+# top of the pool. Adding ListenBrainz adjacency (7.3) changed that mix, and
+# because a graph candidate can fail to resolve to a provider id while a native
+# one never does, the drop rate rose past what 1.6x covers: `recommend_from_song`
+# for "Excuses" put 9 graph candidates in a 16-deep pool, dropped 7, and returned
+# 8 songs instead of 10. The pool had nothing left to backfill from.
+#
+# The fix separates the two budgets, which is what `server.py` already claimed to
+# do ("the pool stays deep for native candidates while the searching stays
+# bounded") but only did on the filtering path. Going deeper is close to free:
+# ranking and exclusion are local, and a native candidate below the search
+# budget costs no round trip at all -- it is exactly the free backfill a dropped
+# graph candidate needs. `max_resolve` still bounds the network.
+BACKFILL_MULTIPLIER = 4
+
+
+def backfill_pool_size(limit: int) -> int:
+    return max(resolve_pool_size(limit), limit * BACKFILL_MULTIPLIER)

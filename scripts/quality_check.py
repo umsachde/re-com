@@ -127,12 +127,18 @@ def measure_graph(graph_conn, limit: int = 10) -> dict:
 
 SIMILARITY_SEEDS = GRAPH_SEEDS_WESTERN + GRAPH_SEEDS_SOUTH_ASIAN
 
-# The three sources graph.neighbours tags its rows with. A candidate's score
-# counts distinct (seed, source) pairs, so the ceiling depends on the backend
-# AND on the seed count: 6 per seed on YouTube, 3 on Spotify, whose
-# capabilities() returns the empty set by measurement rather than pessimism.
-# A raw mean read without that ceiling would report arithmetic as a regression.
-GRAPH_SOURCES = ("graph_artist", "graph_radio", "graph_related")
+# The sources graph.neighbours tags its rows with. A candidate's score counts
+# distinct (seed, source) pairs, so the ceiling depends on the backend AND on
+# the seed count: 7 per seed on YouTube, 4 on Spotify, whose capabilities()
+# returns the empty set by measurement rather than pessimism. A raw mean read
+# without that ceiling would report arithmetic as a regression.
+#
+# `graph_related_lb` is PLAN.md 7.3's second source and MUST be counted here,
+# for the sake of the one number that justified adding it. The baseline said
+# 87% of Spotify's picks rested on a single signal; if the ceiling stayed at 3
+# while a fourth source started contributing, that number would improve partly
+# by arithmetic and the measurement would be flattering itself.
+GRAPH_SOURCES = ("graph_artist", "graph_radio", "graph_related", "graph_related_lb")
 
 
 def _source_ceiling(yt, graph_conn) -> int:
@@ -162,10 +168,16 @@ def _run_similarity(yt, seed_ids, seed_meta, *, exclude, exclude_index, graph_co
         yt, seed_ids, skip_failures=False, graph_conn=graph_conn, seed_meta=seed_meta
     )
     merged = signals._merge_and_score(per_seed)
+    # These two budgets must match server.py's, or this harness measures a path
+    # the server does not run -- which is exactly what happened at 7.11: the
+    # server got the deeper backfill pool, this did not, and the harness kept
+    # reporting short results that the real tool no longer returned.
     ranked, _collapsed = signals._finalize(
-        merged, exclude, signals.resolve_pool_size(limit), exclude_index=exclude_index
+        merged, exclude, signals.backfill_pool_size(limit), exclude_index=exclude_index
     )
-    songs, _unresolved = signals.resolve_candidates(yt, ranked, limit, exclude)
+    songs, _unresolved = signals.resolve_candidates(
+        yt, ranked, limit, exclude, max_resolve=signals.resolve_pool_size(limit)
+    )
     return songs
 
 

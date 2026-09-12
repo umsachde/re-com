@@ -22,6 +22,16 @@ ListenBrainz's `similar-recordings` returned empty for all six resolved tracks
 including *Blinding Lights*, at 12-19s per call, and MusicBrainz 503s under
 1 req/sec. Unusable on a live path.
 
+**That rejection has since been narrowed, not reversed -- see `brainz.py`.**
+It tested `similar-recordings`, a *track*-level endpoint, which this module's
+own "there is no track-level radio" note below should have flagged as the wrong
+shape to ask for: graph similarity here is artist-centric. The labs API's
+`similar-artists` was re-probed on 2026-09-11 and is populated, sub-second, and
+independent of Deezer (Jaccard 0.137), so it now runs alongside this source as
+`graph_related_lb`. Deezer remains the graph's *catalogue* -- ListenBrainz
+returns artists and never tracks, so every neighbour it finds still crosses
+back into `artist_tracks` here.
+
 Deezer needs no key, no auth and no attribution -- the same reasons `tempo.py`
 already chose it -- and its related-artists are culturally correct on the part
 of this library that matters most: AP Dhillon -> Diljit Dosanjh, Shubh, Garry
@@ -209,15 +219,39 @@ def resolve(
 def resolve_artist(
     conn: Any, artist: str, sleep: Callable[[float], None] = time.sleep
 ) -> dict[str, Any] | None:
-    """Deezer artist id for a name, for seeds known only by artist."""
-    if not artist:
+    """Cached Deezer artist id for a name, for seeds known only by artist.
+
+    Negative results are cached alongside the positive ones, as everywhere else
+    in this module. The cache stopped being optional when ListenBrainz became
+    the second source (`brainz.py`): every LB neighbour arrives as a *name* and
+    must cross back into Deezer's catalogue to become tracks, so an uncached
+    lookup here is one search per neighbour per seed, on every call, forever.
+    """
+    if not artist or not artist.strip():
         return None
+    artist_key = artist.strip().lower()
+
+    cached = graph_store.get_artist_lookup(conn, artist_key)
+    if cached is not None:
+        if cached["status"] != graph_store.STATUS_OK:
+            return None
+        return {"id": cached["artist_id"], "name": cached["name"]}
+
     sleep(THROTTLE)
     encoded = urllib.parse.quote(artist.strip()[:180])
-    for hit in _data(_get_safe(f"{API}/search/artist?q={encoded}&limit=5")):
-        if match.artist_matches(hit.get("name"), artist):
-            return {"id": hit.get("id"), "name": hit.get("name")}
-    return None
+    best = next(
+        (h for h in _data(_get_safe(f"{API}/search/artist?q={encoded}&limit=5"))
+         if match.artist_matches(h.get("name"), artist)),
+        None,
+    )
+    graph_store.put_artist_lookup(
+        conn,
+        artist_key,
+        artist_id=best.get("id") if best else None,
+        name=best.get("name") if best else None,
+        status=graph_store.STATUS_OK if best else graph_store.STATUS_NO_MATCH,
+    )
+    return {"id": best["id"], "name": best.get("name")} if best else None
 
 
 # --- adjacency --------------------------------------------------------------
@@ -306,6 +340,43 @@ def playlist_tracks(playlist_id: int, limit: int = 100, sleep: Callable[[float],
 # --- candidate generation ---------------------------------------------------
 
 
+def _brainz_related_ids(
+    conn: Any,
+    artist_name: str | None,
+    want: int,
+    seen: set[int],
+    sleep: Callable[[float], None],
+) -> list[dict[str, Any]]:
+    """ListenBrainz neighbours of `artist_name`, as Deezer artist ids.
+
+    Kept behind its own try/except because the second source is a *supplement*:
+    the measurement that justified it (`brainz.py`'s header) also found its
+    coverage partial -- Dua Lipa has no ListenBrainz neighbours at all. A seed
+    it cannot answer for must degrade to Deezer-only silently, never fail.
+
+    `seen` carries the Deezer ids already expanded so the two sources' overlap
+    (Jaccard 0.137, so real but small) is not crawled twice.
+    """
+    if not artist_name:
+        return []
+    try:
+        import brainz  # local: keeps the second source optional at import time
+
+        names = brainz.related_artist_names(conn, artist_name, limit=want * 3, sleep=sleep)
+    except Exception:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for name in names:
+        if len(out) >= want:
+            break
+        resolved = resolve_artist(conn, name, sleep=sleep)
+        if resolved and resolved.get("id") and resolved["id"] not in seen:
+            seen.add(resolved["id"])
+            out.append(resolved)
+    return out
+
+
 def neighbours(
     conn: Any,
     seed: dict[str, Any],
@@ -313,6 +384,8 @@ def neighbours(
     related_to_expand: int = 3,
     per_artist: int = 10,
     include_radio: bool = True,
+    brainz_to_expand: int = 3,
+    brainz_artist: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[dict[str, Any]]:
     """Graph candidates for one resolved seed track.
@@ -345,8 +418,29 @@ def neighbours(
     if include_radio:
         add(artist_tracks(conn, artist_id, KIND_RADIO, sleep=sleep), "graph_radio")
 
+    expanded: set[int] = {artist_id}
     for rel in related_artists(conn, artist_id, sleep=sleep)[:related_to_expand]:
         if rel.get("id"):
+            expanded.add(rel["id"])
             add(artist_tracks(conn, rel["id"], KIND_TOP, sleep=sleep), "graph_related")
+
+    # The second source (PLAN.md 7.3). Tagged distinctly so a track both
+    # sources surface lands in one candidate with two `sources` entries, which
+    # is what `signals._merge_and_score` already reads as agreement -- the
+    # single-signal problem §7.2 measured is fixed by the tag, not by new
+    # scoring. ListenBrainz supplies adjacency only; the tracks still come from
+    # Deezer's catalogue, so this narrows the single-point-of-failure rather
+    # than removing it.
+    #
+    # `brainz_artist` is the *provider's* credit, and preferring it over the
+    # Deezer-resolved name is not a nicety. Deezer credits "Kesariya" to
+    # Pritam, its composer, while YouTube and Spotify credit Arijit Singh, who
+    # sings it. Looking up the composer's neighbours returned a set with
+    # nothing to do with the seed -- caught on the first live run. Indian film
+    # music makes the composer-vs-performer split the common case, not an edge
+    # one, so the credit the user actually listened under is the right seed.
+    lb_seed = brainz_artist or seed.get("artist_name")
+    for rel in _brainz_related_ids(conn, lb_seed, brainz_to_expand, expanded, sleep):
+        add(artist_tracks(conn, rel["id"], KIND_TOP, sleep=sleep), "graph_related_lb")
 
     return out

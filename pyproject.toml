@@ -34,6 +34,7 @@ Homepage = "https://github.com/umsachde/re-com"
 py-modules = [
     "arc",
     "atlas",
+    "brainz",
     "filters",
     "graph",
     "graph_atlas",

@@ -907,3 +907,61 @@ def test_recommend_from_playlist_explains_an_unreadable_playlist(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no playable tracks"):
         server.recommend_from_playlist("PL1")
+
+
+# --- the pool / search-budget split (PLAN.md 7.11) --------------------------
+
+
+def test_pool_goes_deeper_than_the_search_budget():
+    """These were one number until 7.11, and conflating them lost real songs.
+
+    The pool must be deep enough to backfill dropped graph candidates; the
+    search budget must stay where it was, because that is the network cost.
+    """
+    assert signals.backfill_pool_size(10) > signals.resolve_pool_size(10)
+    assert signals.backfill_pool_size(10) == 40
+    # Never smaller than the old pool, at any limit.
+    for limit in (1, 3, 5, 10, 25, 50):
+        assert signals.backfill_pool_size(limit) >= signals.resolve_pool_size(limit)
+
+
+def test_a_deep_pool_backfills_failures_without_more_searches():
+    """The regression 7.11 fixed: 9 graph candidates in a 16-deep pool dropped 7
+    and returned 8 of 10. The tail must cover the failures, and a native
+    candidate in that tail must cost no search at all."""
+    fake = _FakeProvider(search_results={
+        f"Graph{i} Y": [{"videoId": f"g{i}", "title": f"Graph{i}", "artists": [{"name": "Y"}]}]
+        for i in (7, 8, 9)
+    })
+    # The first seven graph candidates resolve to nothing; three below them do.
+    failing = [_graph_song(f"Graph{i}", "Y", track_id=i) for i in range(7)]
+    working = [_graph_song(f"Graph{i}", "Y", track_id=i) for i in (7, 8, 9)]
+
+    songs, dropped = signals.resolve_candidates(fake, failing + working, 3)
+    assert [s["videoId"] for s in songs] == ["g7", "g8", "g9"]
+    assert dropped == 7
+
+
+def test_unsearched_candidates_are_not_counted_as_failures():
+    """A candidate below the search budget was never looked up, so calling it
+    "couldn't be matched" tells the user something untrue. 7.11's deeper pool
+    made this the difference between a reported 7 and a reported 20."""
+    fake = _FakeProvider(search_results={
+        "Graph0 Y": [{"videoId": "g0", "title": "Graph0", "artists": [{"name": "Y"}]}],
+    })
+    pool = [_graph_song(f"Graph{i}", "Y", track_id=i) for i in range(20)]
+
+    songs, dropped = signals.resolve_candidates(fake, pool, 10, max_resolve=1)
+    assert [s["videoId"] for s in songs] == ["g0"]
+    assert dropped == 0, "19 candidates were never searched; none of them failed"
+    assert len(fake.search_calls) == 1, "the search budget must still bound the network"
+
+
+def test_a_real_resolution_failure_is_still_counted():
+    """The honesty fix must not silence genuine failures."""
+    fake = _FakeProvider()  # finds nothing
+    songs, dropped = signals.resolve_candidates(
+        fake, [_graph_song("Brown Munde", "AP Dhillon")], 10, max_resolve=5
+    )
+    assert songs == []
+    assert dropped == 1

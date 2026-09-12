@@ -337,6 +337,13 @@ Similarity, artist adjacency and the mood corpus come from [Deezer](https://deve
 — no key, no auth, no attribution — and belong to no backend. This is what makes re-com a
 recommendation *app* rather than a wrapper around one service's algorithm.
 
+Artist adjacency additionally comes from [ListenBrainz](https://listenbrainz.org/), a second
+and independent source: measured at Jaccard 0.137 against Deezer's, so it both corroborates
+(60-65% of Deezer's neighbours on this library's Punjabi catalogue) and contributes artists
+Deezer does not carry. Its coverage is partial by design of the data, not by configuration —
+some artists return no neighbours, and a seed it cannot answer for quietly falls back to
+Deezer alone. Deezer remains the *catalogue*: ListenBrainz returns artists, never tracks.
+
 | Signal | Source | Available on |
 | --- | --- | --- |
 | `radio` | the provider's per-track radio/autoplay queue | YouTube Music |
@@ -345,6 +352,7 @@ recommendation *app* rather than a wrapper around one service's algorithm.
 | `graph_artist` | the seed artist's Deezer catalogue | every backend |
 | `graph_radio` | Deezer artist radio | every backend |
 | `graph_related` | adjacent artists' catalogues on Deezer | every backend |
+| `graph_related_lb` | ListenBrainz-adjacent artists' catalogues | every backend |
 
 Each backend declares what it can actually supply (`provider.capabilities()`), the engine runs whatever
 is available, and ranking is unchanged: **a candidate scores by how many distinct signals agree on it.**

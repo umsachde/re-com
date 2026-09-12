@@ -213,6 +213,7 @@ from signals import (  # noqa: E402
     _gather_seed_candidates,
     _merge_and_score,
     _norm_track,
+    backfill_pool_size,
     gather_seeds,
     resolve_candidates,
     resolve_pool_size,
@@ -566,7 +567,7 @@ def recommend_from_song(
 
     exclude = _library_video_ids(yt)
     filtering = bool(language or exclude_languages or bpm or bpm_min or bpm_max or match_seed_tempo)
-    pool = limit * 12 if filtering else resolve_pool_size(limit)
+    pool = limit * 12 if filtering else backfill_pool_size(limit)
     ranked, variants_collapsed = _finalize(
         merged, exclude, pool, exclude_index=_library_exclusion_index() if graph_conn else None
     )
@@ -640,11 +641,16 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     merged = _merge_and_score(per_seed)
 
     exclude = _library_video_ids(yt) | {t["videoId"] for t in tracks}
-    pool = resolve_pool_size(limit)
+    pool = backfill_pool_size(limit)
     songs, _ = _finalize(
         merged, exclude, pool, exclude_index=_library_exclusion_index() if graph_conn else None
     )
-    songs, _unresolved = resolve_candidates(yt, songs, limit, exclude)
+    # Deep pool, bounded searching -- see signals.backfill_pool_size. The cap
+    # matters here: without it, a deeper pool would turn straight into more
+    # provider round trips rather than free native backfill.
+    songs, _unresolved = resolve_candidates(
+        yt, songs, limit, exclude, max_resolve=resolve_pool_size(limit)
+    )
     return songs
 
 
