@@ -620,3 +620,27 @@ BACKFILL_MULTIPLIER = 4
 
 def backfill_pool_size(limit: int) -> int:
     return max(resolve_pool_size(limit), limit * BACKFILL_MULTIPLIER)
+
+
+# The language/tempo filters drop a great deal, so that path needs a far deeper
+# pool. Deep ranking stays cheap; only the searching is bounded.
+FILTER_MULTIPLIER = 12
+
+
+def resolve_budgets(limit: int, *, filtering: bool = False) -> tuple[int, int]:
+    """`(pool depth, search budget)` -- the two numbers, only ever as a pair.
+
+    **Why this exists as one function.** These are different budgets (see
+    `backfill_pool_size`), and every caller needs both. Three call sites paired
+    them by hand, and one of them was `scripts/quality_check.py`, which paired
+    them *differently*: when 7.11 deepened the server's pool, the harness kept
+    the old one and went on reporting a short result the real tool no longer
+    returned. A verification layer that re-derives the logic it measures will
+    eventually measure something that does not ship -- PLAN.md 5's argument,
+    turned on the harness itself.
+
+    Returning a tuple rather than exposing two functions is the point: the
+    pairing is the thing that drifted, so the pairing is what gets centralised.
+    """
+    pool = limit * FILTER_MULTIPLIER if filtering else backfill_pool_size(limit)
+    return pool, resolve_pool_size(limit)

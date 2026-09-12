@@ -152,3 +152,43 @@ def test_source_ceiling_on_a_backend_with_no_native_signals():
     restricted = _Restricted()
     assert quality_check._source_ceiling(restricted, graph_conn=object()) == 4
     assert quality_check._source_ceiling(restricted, graph_conn=None) == 0
+
+
+def test_the_harness_does_not_re_derive_the_resolve_budgets():
+    """PLAN.md 7.11's actual lesson, as a test rather than a comment.
+
+    The harness used to pair the pool depth and the search budget by hand, and
+    paired them differently from the server -- so when the server's pool got
+    deeper the harness went on measuring the old one and reported a short result
+    the real tool no longer returned. A verification layer that re-derives the
+    logic it measures will eventually measure something that does not ship.
+
+    This asserts the *source*, not the numbers: restating the numbers here would
+    be the same duplication in a new place, and would pass while drifting.
+    """
+    import inspect
+
+    import signals
+
+    source = inspect.getsource(quality_check._run_similarity)
+    assert "resolve_budgets" in source, "the harness must take both budgets from signals"
+    for re_derived in ("backfill_pool_size", "resolve_pool_size", "* 12"):
+        assert re_derived not in source, (
+            f"{re_derived!r} is re-derived in the harness; call signals.resolve_budgets instead"
+        )
+    # And the pair itself is the server's pair.
+    assert signals.resolve_budgets(10) == (40, 16)
+    assert signals.resolve_budgets(10, filtering=True) == (120, 16)
+
+
+def test_server_takes_both_budgets_from_one_place():
+    """The same guarantee on the side that actually ships."""
+    import inspect
+
+    import server
+
+    for name in ("recommend_from_song", "recommend_from_playlist"):
+        source = inspect.getsource(getattr(server, name))
+        assert "resolve_candidates" in source, f"{name} no longer resolves; update this test"
+        assert "resolve_budgets" in source, f"{name} must use signals.resolve_budgets"
+        assert "* 12" not in source, f"{name} re-derives the filter pool"

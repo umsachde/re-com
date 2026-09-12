@@ -168,15 +168,13 @@ def _run_similarity(yt, seed_ids, seed_meta, *, exclude, exclude_index, graph_co
         yt, seed_ids, skip_failures=False, graph_conn=graph_conn, seed_meta=seed_meta
     )
     merged = signals._merge_and_score(per_seed)
-    # These two budgets must match server.py's, or this harness measures a path
-    # the server does not run -- which is exactly what happened at 7.11: the
-    # server got the deeper backfill pool, this did not, and the harness kept
-    # reporting short results that the real tool no longer returned.
-    ranked, _collapsed = signals._finalize(
-        merged, exclude, signals.backfill_pool_size(limit), exclude_index=exclude_index
-    )
+    # From signals, never re-derived here: this harness paired these two numbers
+    # by hand and paired them differently, so after 7.11 deepened the server's
+    # pool it went on reporting a short result the real tool no longer returned.
+    pool, searches = signals.resolve_budgets(limit)
+    ranked, _collapsed = signals._finalize(merged, exclude, pool, exclude_index=exclude_index)
     songs, _unresolved = signals.resolve_candidates(
-        yt, ranked, limit, exclude, max_resolve=signals.resolve_pool_size(limit)
+        yt, ranked, limit, exclude, max_resolve=searches
     )
     return songs
 

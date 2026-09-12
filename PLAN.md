@@ -926,7 +926,15 @@ argument turned on the verification layer itself: a harness that duplicates the 
 measures will eventually measure something that does not ship. Now aligned, and the fully
 restored run reads 100/100 slots with 85 distinct songs, above §7.2's 82.
 
-### 7.12 Find a track-level similarity signal
+**Closed properly 2026-09-12.** Aligning the numbers left the *duplication* in place, which is
+the thing that actually drifts — three call sites paired the pool depth and the search budget
+by hand. They now come from one `signals.resolve_budgets(limit, filtering=...)` returning both
+as a tuple, because the pairing is what broke, so the pairing is what gets centralised.
+Pinned by two tests that read the callers' **source** and fail on any re-derivation:
+restating the numbers in a test would be the same duplication in a new place, and would pass
+while drifting. Verified by mutation — reinstating the hand-paired version fails the test.
+
+### 7.12 Find a track-level similarity signal — *probed; blocked on canonical MBIDs*
 
 §7.10 established that the 90% same-artist-seed overlap cannot be fixed by any
 artist-centric source, and both of re-com's are artist-centric. This needs a signal that
@@ -937,6 +945,52 @@ labs endpoint rejected the one tried, with an enumeration error that implies a d
 list), and last.fm's `track.getSimilar`, which is track-level by design but needs a key.
 Probe before proposing: §7.3's lesson is that the shape of the endpoint matters more than
 the reputation of the service.
+
+**Probed 2026-09-12. The signal exists, has exactly the right property, and is blocked on one
+specific thing.** Taking the lesson literally and probing before proposing paid off twice.
+
+**Deezer is a dead end, as recorded.** `/track/{id}/radio` and `/track/{id}/related` both
+return 200 with zero rows. `graph.py`'s note holds; nothing to re-open.
+
+**ListenBrainz `similar-recordings` was rejected twice for the same wrong reason.** The
+2026-08 probe and §7.3's own re-probe both sent an *invalid algorithm name* — the labs
+endpoint answers those with a 400 whose body enumerates the seven permitted values, so the
+"empty for all six tracks" result was never a coverage measurement at all. With a valid name
+it responds in ~0.5s.
+
+**It has the property no artist-centric source can have.** Two Arijit Singh tracks, the exact
+pair that overlaps 90% today:
+
+| seeds | overlap |
+| --- | --- |
+| Channa Mereya vs Kesariya, artist-centric (today) | **0.90** |
+| Channa Mereya vs Kesariya, `similar-recordings` | **0.00** |
+
+Different songs by one artist return genuinely different neighbours, and the neighbours are
+right — *Channa Mereya* returns *Bulleya*, from the same film. This is the signal §7.12 was
+looking for.
+
+**The blocker is identity, not coverage — and that is why it looked empty.** Similarity is
+keyed on one *canonical* recording MBID, while MusicBrainz search returns whichever recording
+scores highest. For "Blinding Lights", 11 of its 12 recording MBIDs return **0** neighbours
+and exactly one returns **100**. So the naive resolve-then-ask path yields near-zero coverage
+while the data is fully present — the same failure mode as §7.3's composer-vs-performer bug,
+one level down: asking a real service a well-formed question about the wrong identity.
+
+**Next step is narrow and specific.** Find canonical-recording-MBID resolution:
+
+- `api.listenbrainz.org/1/metadata/lookup/` does exactly this (artist + title → canonical
+  MBID) but returns **401**; it needs a ListenBrainz user token. Free to obtain, and it would
+  additionally retire `brainz.py`'s MusicBrainz dependency along with its 1 req/sec throttle —
+  §7.9's cost item would disappear rather than move to §7.4.
+- The unauthenticated labs mapper is the alternative; `mbid-mapping`,
+  `mbid-mapping-release`, `explain-mbid-mapping` and `canonical-recording-redirect` all 404,
+  so its real path still has to be found.
+
+Until one of those lands this is not implementable, and **that is the whole finding** — worth
+more than the code it defers, because it converts "ListenBrainz similarity is empty", now
+twice-recorded and twice-wrong, into one concrete unblocking task. Do not re-probe
+`similar-recordings` for emptiness a third time.
 
 ---
 

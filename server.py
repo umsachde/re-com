@@ -213,10 +213,9 @@ from signals import (  # noqa: E402
     _gather_seed_candidates,
     _merge_and_score,
     _norm_track,
-    backfill_pool_size,
     gather_seeds,
+    resolve_budgets,
     resolve_candidates,
-    resolve_pool_size,
     same_song,
 )
 
@@ -567,16 +566,13 @@ def recommend_from_song(
 
     exclude = _library_video_ids(yt)
     filtering = bool(language or exclude_languages or bpm or bpm_min or bpm_max or match_seed_tempo)
-    pool = limit * 12 if filtering else backfill_pool_size(limit)
+    # The pool stays deep for native candidates while the searching stays
+    # bounded -- both numbers together, from one place. See resolve_budgets.
+    pool, searches = resolve_budgets(limit, filtering=filtering)
     ranked, variants_collapsed = _finalize(
         merged, exclude, pool, exclude_index=_library_exclusion_index() if graph_conn else None
     )
-    # The filter path wants a 12x pool because language/tempo filters drop a
-    # lot, but graph candidates cost a provider search each -- so the pool stays
-    # deep for native candidates while the searching stays bounded.
-    ranked, unresolved = resolve_candidates(
-        yt, ranked, pool, exclude, max_resolve=resolve_pool_size(limit)
-    )
+    ranked, unresolved = resolve_candidates(yt, ranked, pool, exclude, max_resolve=searches)
 
     result = _apply_result_filters(
         ranked, seed_video_id=video_id, seed_title=song, seed_artist=artist,
@@ -641,16 +637,11 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     merged = _merge_and_score(per_seed)
 
     exclude = _library_video_ids(yt) | {t["videoId"] for t in tracks}
-    pool = backfill_pool_size(limit)
+    pool, searches = resolve_budgets(limit)
     songs, _ = _finalize(
         merged, exclude, pool, exclude_index=_library_exclusion_index() if graph_conn else None
     )
-    # Deep pool, bounded searching -- see signals.backfill_pool_size. The cap
-    # matters here: without it, a deeper pool would turn straight into more
-    # provider round trips rather than free native backfill.
-    songs, _unresolved = resolve_candidates(
-        yt, songs, limit, exclude, max_resolve=resolve_pool_size(limit)
-    )
+    songs, _unresolved = resolve_candidates(yt, songs, limit, exclude, max_resolve=searches)
     return songs
 
 
