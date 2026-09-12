@@ -71,6 +71,48 @@ CREATE TABLE IF NOT EXISTS graph_artist_related (
     PRIMARY KEY (artist_id, related_id)
 );
 
+-- Artist name -> MusicBrainz identity. Its own table rather than a column on
+-- graph_resolution because the key spaces differ: that one is per *track* and
+-- runs to thousands of rows, this one is per *artist* and runs to hundreds.
+-- MusicBrainz enforces 1 req/sec and 503s the moment you exceed it, so every
+-- lookup here is bought at a full second and cached permanently. MBIDs are
+-- stable identifiers by design -- they do not expire the way a search hit does.
+CREATE TABLE IF NOT EXISTS brainz_artist (
+    artist_key  TEXT PRIMARY KEY,
+    mbid        TEXT,
+    name        TEXT,
+    status      TEXT,
+    resolved_at REAL
+);
+
+-- ListenBrainz artist adjacency, the second graph source (PLAN.md 7.3).
+-- Independent of Deezer's: measured at Jaccard 0.137 across eight seeds, so it
+-- both corroborates (12-15 of Deezer's 20 on the Punjabi catalogue) and adds
+-- (393 new artists) rather than echoing. `score` is ListenBrainz's own
+-- session-co-occurrence weight and is NOT comparable across seed artists --
+-- The Weeknd's neighbours score in the thousands, AP Dhillon's in the tens --
+-- so it may only be used to rank within one seed's list, never between them.
+CREATE TABLE IF NOT EXISTS brainz_related (
+    mbid         TEXT NOT NULL,
+    related_mbid TEXT NOT NULL,
+    name         TEXT,
+    score        INTEGER,
+    position     INTEGER,
+    PRIMARY KEY (mbid, related_mbid)
+);
+
+-- Artist name -> Deezer artist id. ListenBrainz hands back names and MBIDs but
+-- no catalogue, so every LB neighbour must cross back into Deezer to become
+-- tracks. Without this cache that is one Deezer search per neighbour per seed,
+-- forever; it is also the cache `graph.resolve_artist` always should have had.
+CREATE TABLE IF NOT EXISTS graph_artist_lookup (
+    artist_key  TEXT PRIMARY KEY,
+    artist_id   INTEGER,
+    name        TEXT,
+    status      TEXT,
+    resolved_at REAL
+);
+
 -- An artist's tracks. `kind` separates /top (stable, ranked) from /radio
 -- (best-effort, uneven) so a caller can weight them differently rather than
 -- discovering mid-ranking that they are not the same quality of evidence.
@@ -303,6 +345,75 @@ def get_related_artists(conn: sqlite3.Connection, artist_id: int) -> list[dict[s
     return [dict(r) for r in rows]
 
 
+# --- the second source: MusicBrainz identity, ListenBrainz adjacency ---------
+
+
+def get_brainz_artist(conn: sqlite3.Connection, artist_key: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT mbid, name, status FROM brainz_artist WHERE artist_key = ?", (artist_key,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def put_brainz_artist(
+    conn: sqlite3.Connection, artist_key: str, *, mbid: str | None, name: str | None, status: str
+) -> None:
+    conn.execute(
+        "INSERT INTO brainz_artist (artist_key, mbid, name, status, resolved_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(artist_key) DO UPDATE SET "
+        "mbid = excluded.mbid, name = excluded.name, status = excluded.status, "
+        "resolved_at = excluded.resolved_at",
+        (artist_key, mbid, name, status, time.time()),
+    )
+    conn.commit()
+
+
+def put_brainz_related(conn: sqlite3.Connection, mbid: str, related: Iterable[dict[str, Any]]) -> int:
+    rows = [
+        (mbid, r["mbid"], r.get("name"), r.get("score"), position)
+        for position, r in enumerate(related)
+        if r.get("mbid")
+    ]
+    conn.executemany(
+        "INSERT INTO brainz_related (mbid, related_mbid, name, score, position) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(mbid, related_mbid) DO UPDATE SET "
+        "name = excluded.name, score = excluded.score, position = excluded.position",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
+def get_brainz_related(conn: sqlite3.Connection, mbid: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT related_mbid AS mbid, name, score FROM brainz_related WHERE mbid = ? ORDER BY position",
+        (mbid,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_artist_lookup(conn: sqlite3.Connection, artist_key: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT artist_id, name, status FROM graph_artist_lookup WHERE artist_key = ?", (artist_key,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def put_artist_lookup(
+    conn: sqlite3.Connection, artist_key: str, *, artist_id: int | None, name: str | None, status: str
+) -> None:
+    conn.execute(
+        "INSERT INTO graph_artist_lookup (artist_key, artist_id, name, status, resolved_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(artist_key) DO UPDATE SET "
+        "artist_id = excluded.artist_id, name = excluded.name, status = excluded.status, "
+        "resolved_at = excluded.resolved_at",
+        (artist_key, artist_id, name, status, time.time()),
+    )
+    conn.commit()
+
+
 def put_artist_tracks(conn: sqlite3.Connection, artist_id: int, kind: str, tracks: Iterable[dict[str, Any]]) -> int:
     rows = [
         (artist_id, kind, t["id"], t.get("title"), t.get("artist_name"), t.get("artist_id"), position)
@@ -349,6 +460,10 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
             f"SELECT COUNT(*) FROM graph_resolution WHERE status != '{STATUS_OK}'"
         ),
         "artists_with_related": count("SELECT COUNT(DISTINCT artist_id) FROM graph_artist_related"),
+        "artists_with_brainz_related": count("SELECT COUNT(DISTINCT mbid) FROM brainz_related"),
+        "brainz_resolved_artists": count(
+            f"SELECT COUNT(*) FROM brainz_artist WHERE status = '{STATUS_OK}'"
+        ),
         "artist_tracks": count("SELECT COUNT(*) FROM graph_artist_track"),
         "playlists": count("SELECT COUNT(DISTINCT playlist_id) FROM graph_playlist"),
         "playlist_tracks": count("SELECT COUNT(DISTINCT track_id) FROM graph_playlist_track"),
