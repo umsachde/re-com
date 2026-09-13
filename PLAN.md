@@ -1048,7 +1048,7 @@ not a fix for the same-artist defect on this library. Probing all seven algorith
 MusicBrainz recording afterwards showed the gap is ListenBrainz's listener base, not a setting
 (Brown Munde and 295 return 0 everywhere), so the defect moves to §7.13's second track-level source.
 
-### 7.13 A track-level source for the South Asian catalogue — *wired in; live effect not yet measured*
+### 7.13 A track-level source for the South Asian catalogue — *done; first real movement on the same-artist defect*
 
 §7.12's source is nearly empty exactly where the same-artist defect was measured. Probed
 2026-09-12 before choosing a second one:
@@ -1081,6 +1081,30 @@ own text matching (`autocorrect=1`), so there is no MBID step. Error contract me
 (a 200) and an empty list are cached answers; a bad key (403, error 10), rate limiting or a network
 failure cache nothing. `graph.neighbours` now runs both track-level sources through one
 `_similar_tracks` helper. Ceilings rise to 9/seed YouTube, 6 Spotify.
+
+**Spotify A/B, 2026-09-12** (`--similarity`, `limit=10`; ListenBrainz token on in both arms, last.fm
+key off vs on; both arms on a *copy* of the graph cache, because this branch predates #12 and a
+Deezer failure mid-run would otherwise have been cached into the real one):
+
+| | last.fm off | last.fm on |
+| --- | --- | --- |
+| corroborated | 0.22 | **0.34** |
+| concentration (HHI) | 0.254 | **0.238** |
+| cross-seed overlap | 0.058 | **0.051** |
+| distinct / slots | 76/100 | **78/100** |
+| same-artist overlap, Arijit / AP Dhillon | 90% / 80% | 90% / **60%** |
+| cold seed latency | ~1s | ~2-4s |
+
+The off arm reproduces §7.12's token-on column exactly, so the baseline is sound, and on a 1.00
+noise floor every delta is real. **Every quality number improved and none regressed** — unlike
+§7.3, which traded breadth for corroboration, and §7.12, which bought corroboration with a little
+concentration. Corroboration has now more than doubled since §7.10 (0.16 → 0.34), and the AP Dhillon
+pair is the first same-artist overlap to fall meaningfully (90% → 60%).
+
+**The Arijit pair did not move, exactly as the probe predicted**: neither track-level source has a
+single neighbour for Channa Mereya or Kesariya. That residual is now understood as a data gap for
+recent Bollywood film songs — listeners split across duplicate uploads — rather than a missing
+source. The cost is first-lookup latency; everything is cached after.
 
 ---
 
