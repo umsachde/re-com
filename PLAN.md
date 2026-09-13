@@ -934,7 +934,7 @@ Pinned by two tests that read the callers' **source** and fail on any re-derivat
 restating the numbers in a test would be the same duplication in a new place, and would pass
 while drifting. Verified by mutation — reinstating the hand-paired version fails the test.
 
-### 7.12 Find a track-level similarity signal — *wired in; ranked-result effect not yet measured*
+### 7.12 Find a track-level similarity signal — *wired in; small real gain, defect still open*
 
 §7.10 established that the 90% same-artist-seed overlap cannot be fixed by any
 artist-centric source, and both of re-com's are artist-centric. This needs a signal that
@@ -1025,8 +1025,28 @@ YouTube, 5 Spotify.
 Inconclusive, and said so: YouTube's noise floor is 0.87, and the same-artist pairs moved in
 opposite directions. The one consistent movement is corroboration — more track-level neighbours
 land on songs another source already named. Cold-cache seeds rose to ~7s on the western half
-(first lookups; cached thereafter). **Spotify is the decisive run and is still owed** — it was
-rate-limited by Spotify's API at the time (Retry-After ~41 min).
+(first lookups; cached thereafter).
+
+**Spotify A/B, same day** — the decisive run, since repeated runs there are bit-identical:
+
+| | token off | token on |
+| --- | --- | --- |
+| corroborated | 0.16 | **0.22** |
+| concentration (HHI) | 0.240 | 0.254 |
+| cross-seed overlap | 0.058 | 0.058 |
+| distinct / slots | 76/100 | 76/100 |
+| same-artist overlap, Arijit / AP Dhillon | 90% / 90% | 90% / **80%** |
+
+The off arm reproduces §7.10's Spotify column (0.16, 90%/90%), so the harness measured the same
+thing. On a 1.00 noise floor every delta here is real: corroboration +6 points with no loss of
+breadth, one same-artist pair down 10 points, concentration slightly worse. That is a genuine
+gain and a small one, and it lands where coverage predicted — the Arijit pair, which has one
+neighbour each, does not move at all.
+
+**Verdict.** Worth keeping as the canonical-identity groundwork and a modest corroboration gain;
+not a fix for the same-artist defect on this library. Probing all seven algorithms and every
+MusicBrainz recording afterwards showed the gap is ListenBrainz's listener base, not a setting
+(Brown Munde and 295 return 0 everywhere), so the defect moves to §7.13's second track-level source.
 
 ---
 
