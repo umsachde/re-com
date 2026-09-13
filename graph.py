@@ -377,24 +377,27 @@ def _brainz_related_ids(
     return out
 
 
-def _brainz_similar_tracks(
+def _similar_tracks(
     conn: Any,
+    source: str,
     title: str | None,
     artist_name: str | None,
     want: int,
     sleep: Callable[[float], None],
 ) -> list[dict[str, Any]]:
-    """ListenBrainz track-level neighbours, resolved to Deezer track rows.
+    """Track-level neighbours from `brainz` or `lastfm`, resolved to Deezer track rows.
 
-    The same supplement contract as `_brainz_related_ids`: no token, no
-    coverage or a failure all degrade to nothing, never an error.
+    Both modules expose the same `similar_tracks`. The same supplement contract
+    as `_brainz_related_ids`: no credential, no coverage or a failure all
+    degrade to nothing, never an error.
     """
     if not title or not artist_name:
         return []
     try:
-        import brainz  # local: keeps the second source optional at import time
+        import importlib
 
-        similar = brainz.similar_tracks(conn, title, artist_name, limit=want, sleep=sleep)
+        module = importlib.import_module(source)  # local: keeps each source optional at import time
+        similar = module.similar_tracks(conn, title, artist_name, limit=want, sleep=sleep)
     except Exception:
         return []
 
@@ -418,6 +421,7 @@ def neighbours(
     include_radio: bool = True,
     brainz_to_expand: int = 3,
     brainz_tracks: int = 10,
+    lastfm_tracks: int = 10,
     brainz_artist: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[dict[str, Any]]:
@@ -479,8 +483,13 @@ def neighbours(
     # Track-level similarity (PLAN.md 7.12): the only signal here that tells two
     # songs by one artist apart. Deezer's title is the cleaner query; the
     # provider's credit is the right artist, for the composer reason above.
-    for row in _brainz_similar_tracks(conn, seed.get("title"), lb_seed, brainz_tracks, sleep):
-        if row["id"] != seed_track_id:
-            out.append({**row, "source": "graph_similar_lb"})
+    for source, tag, want in (
+        ("brainz", "graph_similar_lb", brainz_tracks),
+        # last.fm reaches the Punjabi catalogue ListenBrainz cannot (PLAN.md 7.13).
+        ("lastfm", "graph_similar_lfm", lastfm_tracks),
+    ):
+        for row in _similar_tracks(conn, source, seed.get("title"), lb_seed, want, sleep):
+            if row["id"] != seed_track_id:
+                out.append({**row, "source": tag})
 
     return out

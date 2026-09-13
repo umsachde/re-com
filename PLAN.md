@@ -1048,6 +1048,40 @@ not a fix for the same-artist defect on this library. Probing all seven algorith
 MusicBrainz recording afterwards showed the gap is ListenBrainz's listener base, not a setting
 (Brown Munde and 295 return 0 everywhere), so the defect moves to §7.13's second track-level source.
 
+### 7.13 A track-level source for the South Asian catalogue — *wired in; live effect not yet measured*
+
+§7.12's source is nearly empty exactly where the same-artist defect was measured. Probed
+2026-09-12 before choosing a second one:
+
+**No ListenBrainz configuration fixes it.** All seven `similar-recordings` algorithms, same seeds:
+the one shipped is within two neighbours of the best on every seed, and Brown Munde and 295 return
+0 under all seven. Every MusicBrainz recording of both also returns 0, so this is ListenBrainz's
+listener base, not the canonical-identity problem from §7.12.
+
+**last.fm `track.getSimilar` reaches it:**
+
+| seed | last.fm | ListenBrainz | own-artist share |
+| --- | --- | --- | --- |
+| Excuses | 50 | 28 | 1/50 |
+| Brown Munde | **50** | 0 | 2/50 |
+| 295 | **50** | 0 | 0/50 |
+| Tum Hi Ho | **50** | 8 | 2/50 |
+| Lover (Diljit) | 50 | 5 | 2/50 |
+| Channa Mereya / Kesariya | 0 / 0 | 1 / 1 | — |
+
+Excuses vs Brown Munde overlap 0.27 on last.fm, against 0.97 artist-centrically. ~0.5s per call.
+
+**The remaining gap is recent Bollywood film songs**, and it is a data shape, not a lookup miss:
+every last.fm spelling of Channa Mereya and Kesariya returns zero, because their listeners are
+split across lo-fi flips, "(From <film>)" titles and MP3-site rips and no single entry clears the
+similarity threshold. Neither track-level source covers them.
+
+Wired in as `lastfm.py`, tagged `graph_similar_lfm`, behind `LASTFM_API_KEY`. Identity is last.fm's
+own text matching (`autocorrect=1`), so there is no MBID step. Error contract measured live: error 6
+(a 200) and an empty list are cached answers; a bad key (403, error 10), rate limiting or a network
+failure cache nothing. `graph.neighbours` now runs both track-level sources through one
+`_similar_tracks` helper. Ceilings rise to 9/seed YouTube, 6 Spotify.
+
 ---
 
 ## 8. Version history
