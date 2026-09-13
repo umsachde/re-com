@@ -252,6 +252,7 @@ local timestamps are the only clock this system will ever have:
 | `RECOM_JUDGE_BATCH` | `12` | Songs per labelling request. |
 | `RECOM_SEED_WORKERS` | `6` | How many seeds are gathered concurrently. See [Speed](#speed). |
 | `RECOM_GRAPH` | `1` | Set `0` to disable the [music graph](#the-music-graph) and use native signals only. |
+| `LISTENBRAINZ_TOKEN` | *(none)* | ListenBrainz user token (free, from listenbrainz.org/settings). Enables track-level similarity; set it on every re-com instance. |
 | `RECOM_GRAPH_DB_PATH` | `~/.recom/graph.db` | The music-graph cache. **Shared by every backend** — not scoped per provider. |
 | `RECOM_SPOTIFY_CAPABILITIES` | *(none)* | Comma-separated `radio,related,artist` to re-enable Spotify's native signals if your app has Extended Quota Mode. |
 
@@ -344,6 +345,11 @@ Deezer does not carry. Its coverage is partial by design of the data, not by con
 some artists return no neighbours, and a seed it cannot answer for quietly falls back to
 Deezer alone. Deezer remains the *catalogue*: ListenBrainz returns artists, never tracks.
 
+With a `LISTENBRAINZ_TOKEN` set, ListenBrainz also supplies **track-level** similarity
+(`graph_similar_lb`) — the only signal that tells two songs by the same artist apart. It is dense on
+Western pop and thin on the Punjabi/Bollywood catalogue (often 0–1 neighbours). Without a token it is
+simply off.
+
 | Signal | Source | Available on |
 | --- | --- | --- |
 | `radio` | the provider's per-track radio/autoplay queue | YouTube Music |
@@ -353,6 +359,7 @@ Deezer alone. Deezer remains the *catalogue*: ListenBrainz returns artists, neve
 | `graph_radio` | Deezer artist radio | every backend |
 | `graph_related` | adjacent artists' catalogues on Deezer | every backend |
 | `graph_related_lb` | ListenBrainz-adjacent artists' catalogues | every backend |
+| `graph_similar_lb` | ListenBrainz track-level similar recordings | every backend, with `LISTENBRAINZ_TOKEN` |
 
 Each backend declares what it can actually supply (`provider.capabilities()`), the engine runs whatever
 is available, and ranking is unchanged: **a candidate scores by how many distinct signals agree on it.**

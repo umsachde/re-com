@@ -934,7 +934,7 @@ Pinned by two tests that read the callers' **source** and fail on any re-derivat
 restating the numbers in a test would be the same duplication in a new place, and would pass
 while drifting. Verified by mutation — reinstating the hand-paired version fails the test.
 
-### 7.12 Find a track-level similarity signal — *probed; blocked on canonical MBIDs*
+### 7.12 Find a track-level similarity signal — *wired in; small real gain, defect still open*
 
 §7.10 established that the 90% same-artist-seed overlap cannot be fixed by any
 artist-centric source, and both of re-com's are artist-centric. This needs a signal that
@@ -991,6 +991,62 @@ Until one of those lands this is not implementable, and **that is the whole find
 more than the code it defers, because it converts "ListenBrainz similarity is empty", now
 twice-recorded and twice-wrong, into one concrete unblocking task. Do not re-probe
 `similar-recordings` for emptiness a third time.
+
+**Unblocked and wired in 2026-09-12** via the token route. `brainz.resolve_recording` calls
+`/1/metadata/lookup/` (~0.5s; a miss is `{}` with a 200, cached as no-match; a 401 is not cached),
+`brainz.similar_recordings` calls the labs endpoint with `LB_RECORDING_ALGORITHM` — a *different*
+enumeration from the artist one — and `graph.neighbours` resolves each neighbour back to Deezer
+and tags it `graph_similar_lb`. No token means the source is off. Live, against the real cache:
+
+| seed pair | artist-centric | `graph_similar_lb` | whole pool |
+| --- | --- | --- | --- |
+| Channa Mereya vs Kesariya | 0.99 | 0.00 | 0.96 |
+| Blinding Lights vs Save Your Tears | 0.97 | 0.25 | 0.82 |
+| Excuses vs Brown Munde | 0.97 | 0.00 (Brown Munde: 0 rows) | 0.87 |
+
+The signal differentiates exactly as probed, but it is 1–10 rows in a ~72-candidate pool and thin
+on the South Asian half (Channa Mereya 1, Kesariya 1, Brown Munde 0), so whole-pool overlap barely
+moves there. What decides whether it matters is the *ranked top ten*, where agreement with another
+source lifts a candidate — that needs `quality_check.py --similarity` re-baselined (Spotify first,
+whose noise floor is 1.00, so any delta is real). `GRAPH_SOURCES` now counts it: ceilings are 8/seed
+YouTube, 5 Spotify.
+
+**YouTube A/B, 2026-09-12** (`--similarity`, `limit=10`, token off vs on, same cache, both ceilings 8):
+
+| | token off | token on |
+| --- | --- | --- |
+| corroborated | 0.51 | **0.54** |
+| corroboration delta (graph vs native) | +0.11 | **+0.18** |
+| concentration (HHI) | 0.194 | 0.198 |
+| cross-seed overlap | 0.022 | 0.029 |
+| distinct / slots | 90/100 | 87/100 |
+| same-artist overlap, Arijit / AP Dhillon | 40% / 30% | 30% / 50% |
+
+Inconclusive, and said so: YouTube's noise floor is 0.87, and the same-artist pairs moved in
+opposite directions. The one consistent movement is corroboration — more track-level neighbours
+land on songs another source already named. Cold-cache seeds rose to ~7s on the western half
+(first lookups; cached thereafter).
+
+**Spotify A/B, same day** — the decisive run, since repeated runs there are bit-identical:
+
+| | token off | token on |
+| --- | --- | --- |
+| corroborated | 0.16 | **0.22** |
+| concentration (HHI) | 0.240 | 0.254 |
+| cross-seed overlap | 0.058 | 0.058 |
+| distinct / slots | 76/100 | 76/100 |
+| same-artist overlap, Arijit / AP Dhillon | 90% / 90% | 90% / **80%** |
+
+The off arm reproduces §7.10's Spotify column (0.16, 90%/90%), so the harness measured the same
+thing. On a 1.00 noise floor every delta here is real: corroboration +6 points with no loss of
+breadth, one same-artist pair down 10 points, concentration slightly worse. That is a genuine
+gain and a small one, and it lands where coverage predicted — the Arijit pair, which has one
+neighbour each, does not move at all.
+
+**Verdict.** Worth keeping as the canonical-identity groundwork and a modest corroboration gain;
+not a fix for the same-artist defect on this library. Probing all seven algorithms and every
+MusicBrainz recording afterwards showed the gap is ListenBrainz's listener base, not a setting
+(Brown Munde and 295 return 0 everywhere), so the defect moves to §7.13's second track-level source.
 
 ---
 

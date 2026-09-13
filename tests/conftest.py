@@ -36,6 +36,8 @@ def isolated_state(tmp_path, monkeypatch):
     # asks for it (see the `graph_enabled` fixture). Every pre-v6 test states a
     # native-signal expectation and must keep getting native-only behaviour.
     monkeypatch.setattr(server, "GRAPH_ENABLED", False)
+    # A developer shell with a real token must not change what the suite tests.
+    monkeypatch.delenv("LISTENBRAINZ_TOKEN", raising=False)
     return tmp_path
 
 
