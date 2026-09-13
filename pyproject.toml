@@ -41,6 +41,7 @@ py-modules = [
     "graph_store",
     "judge",
     "label",
+    "lastfm",
     "lyrics",
     "match",
     "moodspace",

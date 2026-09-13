@@ -38,6 +38,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "GRAPH_ENABLED", False)
     # A developer shell with a real token must not change what the suite tests.
     monkeypatch.delenv("LISTENBRAINZ_TOKEN", raising=False)
+    monkeypatch.delenv("LASTFM_API_KEY", raising=False)
     return tmp_path
 
 

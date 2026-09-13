@@ -127,6 +127,18 @@ CREATE TABLE IF NOT EXISTS brainz_similar_recording (
     PRIMARY KEY (mbid, similar_mbid)
 );
 
+-- last.fm track-level similarity (PLAN.md 7.13), keyed on "song_key|artist_key"
+-- because last.fm matches on text and has no identity step. `match` is last.fm's
+-- 0..1 similarity and, like the ListenBrainz scores, ranks within one seed only.
+CREATE TABLE IF NOT EXISTS lastfm_similar (
+    seed_key    TEXT NOT NULL,
+    position    INTEGER NOT NULL,
+    title       TEXT,
+    artist_name TEXT,
+    match       REAL,
+    PRIMARY KEY (seed_key, position)
+);
+
 -- Artist name -> Deezer artist id. ListenBrainz hands back names and MBIDs but
 -- no catalogue, so every LB neighbour must cross back into Deezer to become
 -- tracks. Without this cache that is one Deezer search per neighbour per seed,
@@ -473,6 +485,28 @@ def get_brainz_similar_recordings(conn: sqlite3.Connection, mbid: str) -> list[d
         "SELECT similar_mbid AS mbid, title, artist_name, score FROM brainz_similar_recording "
         "WHERE mbid = ? ORDER BY position",
         (mbid,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def put_lastfm_similar(conn: sqlite3.Connection, seed_key: str, similar: Iterable[dict[str, Any]]) -> int:
+    rows = [
+        (seed_key, position, r.get("title"), r.get("artist_name"), r.get("match"))
+        for position, r in enumerate(similar)
+    ]
+    conn.execute("DELETE FROM lastfm_similar WHERE seed_key = ?", (seed_key,))
+    conn.executemany(
+        "INSERT INTO lastfm_similar (seed_key, position, title, artist_name, match) VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
+def get_lastfm_similar(conn: sqlite3.Connection, seed_key: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT title, artist_name, match FROM lastfm_similar WHERE seed_key = ? ORDER BY position",
+        (seed_key,),
     ).fetchall()
     return [dict(r) for r in rows]
 

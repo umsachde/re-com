@@ -22,6 +22,7 @@ gated:
   graph    graph_artist / graph_radio / graph_related (Deezer) and
            graph_related_lb (ListenBrainz) -- always available
            graph_similar_lb (ListenBrainz, track-level) -- needs LISTENBRAINZ_TOKEN
+           graph_similar_lfm (last.fm, track-level) -- needs LASTFM_API_KEY
 
 The graph signals come from Deezer (`graph.py`), belong to no provider, and
 cannot be revoked by one. They are artist-centric because Deezer has no

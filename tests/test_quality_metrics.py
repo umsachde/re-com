@@ -137,7 +137,7 @@ def test_source_ceiling_counts_graph_sources_only_when_the_graph_is_on():
 
     fake = _Fake()
     # Four graph sources since PLAN.md 7.3 added ListenBrainz adjacency.
-    assert quality_check._source_ceiling(fake, graph_conn=object()) == 8
+    assert quality_check._source_ceiling(fake, graph_conn=object()) == 9
     assert quality_check._source_ceiling(fake, graph_conn=None) == 3
 
 
@@ -150,7 +150,7 @@ def test_source_ceiling_on_a_backend_with_no_native_signals():
             return set()
 
     restricted = _Restricted()
-    assert quality_check._source_ceiling(restricted, graph_conn=object()) == 5
+    assert quality_check._source_ceiling(restricted, graph_conn=object()) == 6
     assert quality_check._source_ceiling(restricted, graph_conn=None) == 0
 
 

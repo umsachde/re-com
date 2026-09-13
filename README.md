@@ -252,6 +252,7 @@ local timestamps are the only clock this system will ever have:
 | `RECOM_JUDGE_BATCH` | `12` | Songs per labelling request. |
 | `RECOM_SEED_WORKERS` | `6` | How many seeds are gathered concurrently. See [Speed](#speed). |
 | `RECOM_GRAPH` | `1` | Set `0` to disable the [music graph](#the-music-graph) and use native signals only. |
+| `LASTFM_API_KEY` | *(none)* | last.fm API key (free, last.fm/api/account/create; the shared secret is not needed). Enables the second track-level similarity source; set it on every re-com instance. |
 | `LISTENBRAINZ_TOKEN` | *(none)* | ListenBrainz user token (free, from listenbrainz.org/settings). Enables track-level similarity; set it on every re-com instance. |
 | `RECOM_GRAPH_DB_PATH` | `~/.recom/graph.db` | The music-graph cache. **Shared by every backend** — not scoped per provider. |
 | `RECOM_SPOTIFY_CAPABILITIES` | *(none)* | Comma-separated `radio,related,artist` to re-enable Spotify's native signals if your app has Extended Quota Mode. |
@@ -350,6 +351,11 @@ With a `LISTENBRAINZ_TOKEN` set, ListenBrainz also supplies **track-level** simi
 Western pop and thin on the Punjabi/Bollywood catalogue (often 0–1 neighbours). Without a token it is
 simply off.
 
+With a `LASTFM_API_KEY` set, [last.fm](https://www.last.fm/api)'s `track.getSimilar` adds a second
+track-level source (`graph_similar_lfm`) that reaches the Punjabi catalogue ListenBrainz cannot — 50
+neighbours each for seeds where ListenBrainz returns none. Recent Bollywood film songs remain uncovered by
+both.
+
 | Signal | Source | Available on |
 | --- | --- | --- |
 | `radio` | the provider's per-track radio/autoplay queue | YouTube Music |
@@ -360,6 +366,7 @@ simply off.
 | `graph_related` | adjacent artists' catalogues on Deezer | every backend |
 | `graph_related_lb` | ListenBrainz-adjacent artists' catalogues | every backend |
 | `graph_similar_lb` | ListenBrainz track-level similar recordings | every backend, with `LISTENBRAINZ_TOKEN` |
+| `graph_similar_lfm` | last.fm track-level similar tracks | every backend, with `LASTFM_API_KEY` |
 
 Each backend declares what it can actually supply (`provider.capabilities()`), the engine runs whatever
 is available, and ranking is unchanged: **a candidate scores by how many distinct signals agree on it.**
