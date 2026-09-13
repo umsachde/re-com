@@ -145,6 +145,62 @@ def test_neighbours_tag_lastfm_candidates_distinctly(graph_db, monkeypatch):
     assert "AP+Dhillon" in fake.calls[0] and "Deezer" not in fake.calls[0]
 
 
+class _FakeLastfmByArtist:
+    """Routes on the `artist=` query param, the way last.fm's own listener
+    data is split by credit -- see the composer-credit fallback below."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []
+
+    def __call__(self, url):
+        self.calls.append(url)
+        for fragment, payload in self.routes.items():
+            if f"artist={fragment}" in url:
+                return payload
+        return _similar()
+
+
+def test_neighbours_fall_back_to_composer_credit_when_performer_credit_is_empty(graph_db, monkeypatch):
+    """PLAN.md 7.13 residual: last.fm's listener data for a film song is often
+    split across the performer credit (thin) and the composer credit (Deezer's
+    own), so a miss on the first is retried under the second before giving up."""
+    monkeypatch.setattr(graph, "_get", _FakeDeezer({
+        "q=Kabira": {"data": [_dz_track(8003, "Kabira", "Pritam", 402)]},
+    }))
+    fake = _wire(monkeypatch, _FakeLastfmByArtist({"Pritam": _similar(("Kabira", "Pritam", 1.0))}))
+
+    rows = graph.neighbours(
+        graph_db,
+        {"id": 1, "title": "Channa Mereya", "artist_id": 100, "artist_name": "Pritam"},
+        include_radio=False,
+        brainz_artist="Arijit Singh",
+        sleep=lambda _s: None,
+    )
+
+    assert [r["title"] for r in rows] == ["Kabira"]
+    assert rows[0]["source"] == "graph_similar_lfm"
+    assert len(fake.calls) == 2
+    assert "artist=Arijit+Singh" in fake.calls[0]
+    assert "artist=Pritam" in fake.calls[1]
+
+
+def test_neighbours_do_not_retry_lastfm_when_credits_are_the_same(graph_db, monkeypatch):
+    """No second call when there is no distinct composer credit to fall back to."""
+    monkeypatch.setattr(graph, "_get", _FakeDeezer({}))
+    fake = _wire(monkeypatch, _FakeLastfmByArtist({}))
+
+    rows = graph.neighbours(
+        graph_db,
+        {"id": 1, "title": "Excuses", "artist_id": 100, "artist_name": "AP Dhillon"},
+        include_radio=False,
+        sleep=lambda _s: None,
+    )
+
+    assert rows == []
+    assert len(fake.calls) == 1
+
+
 def test_neighbours_survive_lastfm_raising(graph_db, monkeypatch):
     """A supplement that breaks the primary path is not a supplement."""
     monkeypatch.setattr(graph, "_get", _FakeDeezer({

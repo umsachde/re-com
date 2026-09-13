@@ -532,13 +532,23 @@ def neighbours(
     # Track-level similarity (PLAN.md 7.12): the only signal here that tells two
     # songs by one artist apart. Deezer's title is the cleaner query; the
     # provider's credit is the right artist, for the composer reason above.
-    for source, tag, want in (
-        ("brainz", "graph_similar_lb", brainz_tracks),
-        # last.fm reaches the Punjabi catalogue ListenBrainz cannot (PLAN.md 7.13).
-        ("lastfm", "graph_similar_lfm", lastfm_tracks),
-    ):
-        for row in _similar_tracks(conn, source, seed.get("title"), lb_seed, want, sleep):
-            if row["id"] != seed_track_id:
-                out.append({**row, "source": tag})
+    for row in _similar_tracks(conn, "brainz", seed.get("title"), lb_seed, brainz_tracks, sleep):
+        if row["id"] != seed_track_id:
+            out.append({**row, "source": "graph_similar_lb"})
+
+    # last.fm reaches the Punjabi catalogue ListenBrainz cannot (PLAN.md 7.13).
+    lfm_rows = _similar_tracks(conn, "lastfm", seed.get("title"), lb_seed, lastfm_tracks, sleep)
+    composer = seed.get("artist_name")
+    if not lfm_rows and composer and composer != lb_seed:
+        # Unlike ListenBrainz's artist adjacency, last.fm's track-level listener
+        # data is split by *credit*, not just spelling: "Channa Mereya" has 983
+        # last.fm listeners under Arijit Singh (performer) and 52,899 under
+        # Pritam (composer) -- a different track entry, not a dupe of the same
+        # one. Retried only on a miss, and cached like any other lookup, so the
+        # cost is one extra call per seed, once ever (PLAN.md 7.13 residual).
+        lfm_rows = _similar_tracks(conn, "lastfm", seed.get("title"), composer, lastfm_tracks, sleep)
+    for row in lfm_rows:
+        if row["id"] != seed_track_id:
+            out.append({**row, "source": "graph_similar_lfm"})
 
     return out

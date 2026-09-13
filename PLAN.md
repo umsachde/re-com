@@ -1106,6 +1106,27 @@ single neighbour for Channa Mereya or Kesariya. That residual is now understood 
 recent Bollywood film songs — listeners split across duplicate uploads — rather than a missing
 source. The cost is first-lookup latency; everything is cached after.
 
+### 7.14 The Channa Mereya residual, narrowed — *done, partial*
+
+§7.13's residual turned out to be two different problems wearing one label. Probed live
+2026-09-13: last.fm doesn't lose these songs to duplicate *uploads*, it splits them by
+*credit*. "Channa Mereya" is two separate last.fm track entries — 983 listeners under Arijit
+Singh (the performer, the credit graph.py deliberately queries under, for the composer-vs-
+performer reason in §7.3) and 52,899 under Pritam (the composer, Deezer's own credit) — and
+`track.getSimilar` is empty on the thin one and returns ten genuinely relevant neighbours
+(Kabira, Enna Sona, Agar Tum Saath Ho...) on the other. "Kesariya" is empty under *both*
+credits, so that one is the real duplicate-upload case §7.13 described.
+
+Wired in: `graph.neighbours` now retries last.fm under the seed's Deezer (composer) credit
+when the performer-credit query comes back empty and the two credits differ. Cost is one
+extra call only on a cache miss — never on a hit, never when the first call already
+succeeded — so it is free in steady state. Spot-checked three more recent Bollywood titles
+under both credits (Raataan Lambiyan, Kalank Title Track, Agar Tum Saath Ho) to see whether
+this generalizes: all empty either way. So this fixes Channa Mereya specifically, not the
+class of problem — most of §7.13's residual is still real. Tests:
+`test_neighbours_fall_back_to_composer_credit_when_performer_credit_is_empty` and
+`test_neighbours_do_not_retry_lastfm_when_credits_are_the_same` in `tests/test_lastfm.py`.
+
 ---
 
 ## 8. Version history
