@@ -101,6 +101,32 @@ CREATE TABLE IF NOT EXISTS brainz_related (
     PRIMARY KEY (mbid, related_mbid)
 );
 
+-- Title+artist -> canonical recording MBID, via ListenBrainz's lookup rather
+-- than MusicBrainz search: similarity is keyed on one canonical recording and
+-- search returns whichever duplicate scores highest (PLAN.md 7.12).
+CREATE TABLE IF NOT EXISTS brainz_recording (
+    song_key    TEXT NOT NULL,
+    artist_key  TEXT NOT NULL,
+    mbid        TEXT,
+    title       TEXT,
+    artist_name TEXT,
+    status      TEXT,
+    resolved_at REAL,
+    PRIMARY KEY (song_key, artist_key)
+);
+
+-- ListenBrainz track-level similarity. `score` has the same caveat as
+-- brainz_related's: comparable within one seed's list only.
+CREATE TABLE IF NOT EXISTS brainz_similar_recording (
+    mbid         TEXT NOT NULL,
+    similar_mbid TEXT NOT NULL,
+    title        TEXT,
+    artist_name  TEXT,
+    score        INTEGER,
+    position     INTEGER,
+    PRIMARY KEY (mbid, similar_mbid)
+);
+
 -- Artist name -> Deezer artist id. ListenBrainz hands back names and MBIDs but
 -- no catalogue, so every LB neighbour must cross back into Deezer to become
 -- tracks. Without this cache that is one Deezer search per neighbour per seed,
@@ -388,6 +414,64 @@ def put_brainz_related(conn: sqlite3.Connection, mbid: str, related: Iterable[di
 def get_brainz_related(conn: sqlite3.Connection, mbid: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT related_mbid AS mbid, name, score FROM brainz_related WHERE mbid = ? ORDER BY position",
+        (mbid,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_brainz_recording(conn: sqlite3.Connection, song_key: str, artist_key: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT mbid, title, artist_name, status FROM brainz_recording WHERE song_key = ? AND artist_key = ?",
+        (song_key, artist_key),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def put_brainz_recording(
+    conn: sqlite3.Connection,
+    song_key: str,
+    artist_key: str,
+    *,
+    mbid: str | None,
+    title: str | None,
+    artist_name: str | None,
+    status: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO brainz_recording (song_key, artist_key, mbid, title, artist_name, status, resolved_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(song_key, artist_key) DO UPDATE SET "
+        "mbid = excluded.mbid, title = excluded.title, artist_name = excluded.artist_name, "
+        "status = excluded.status, resolved_at = excluded.resolved_at",
+        (song_key, artist_key, mbid, title, artist_name, status, time.time()),
+    )
+    conn.commit()
+
+
+def put_brainz_similar_recordings(
+    conn: sqlite3.Connection, mbid: str, similar: Iterable[dict[str, Any]]
+) -> int:
+    rows = [
+        (mbid, r["mbid"], r.get("title"), r.get("artist_name"), r.get("score"), position)
+        for position, r in enumerate(similar)
+        if r.get("mbid")
+    ]
+    conn.executemany(
+        "INSERT INTO brainz_similar_recording (mbid, similar_mbid, title, artist_name, score, position) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(mbid, similar_mbid) DO UPDATE SET "
+        "title = excluded.title, artist_name = excluded.artist_name, "
+        "score = excluded.score, position = excluded.position",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
+def get_brainz_similar_recordings(conn: sqlite3.Connection, mbid: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT similar_mbid AS mbid, title, artist_name, score FROM brainz_similar_recording "
+        "WHERE mbid = ? ORDER BY position",
         (mbid,),
     ).fetchall()
     return [dict(r) for r in rows]

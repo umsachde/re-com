@@ -51,6 +51,7 @@ permanently: MBIDs are stable by design.
 """
 
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -61,6 +62,7 @@ import graph_store
 import match
 
 MB_API = "https://musicbrainz.org/ws/2"
+LB_API = "https://api.listenbrainz.org/1"
 LB_LABS = "https://labs.api.listenbrainz.org"
 
 # MusicBrainz requires a contactable User-Agent and will block generic ones.
@@ -81,7 +83,21 @@ LB_ALGORITHM = (
     "_threshold_10_limit_100_filter_True_skip_30"
 )
 
+# A *different* enumeration from LB_ALGORITHM: `similar-recordings` rejects the
+# artist names with a 400 listing its seven permitted values, which is how the
+# 2026-08 probe and §7.3's re-probe both mistook a bad request for no coverage.
+LB_RECORDING_ALGORITHM = (
+    "session_based_days_7500_session_300_contribution_5_threshold_15_limit_50_skip_30"
+)
+
 _EP_LB_RELATED = "lb_artist_related"
+_EP_LB_SIMILAR_RECORDINGS = "lb_similar_recordings"
+
+
+def token() -> str | None:
+    """The ListenBrainz user token, read per call so tests and reconfigs see changes."""
+    value = os.environ.get("LISTENBRAINZ_TOKEN", "").strip()
+    return value or None
 
 _NET_ERRORS = (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError)
 
@@ -107,14 +123,23 @@ class _Unavailable:
 UNAVAILABLE = _Unavailable()
 
 
-def _get_safe(url: str, tries: int = 3, sleep: Callable[[float], None] = time.sleep) -> Any:
+def _get_safe(
+    url: str,
+    tries: int = 3,
+    sleep: Callable[[float], None] = time.sleep,
+    auth: str | None = None,
+) -> Any:
     """A GET that reports *why* it has no answer.
 
     Returns the payload, or `UNAVAILABLE` when the service could not be reached
     at all. Retries only on 503, which for MusicBrainz means "you went too
     fast" rather than "this does not exist" -- the one failure worth a retry.
+    A 401 from a bad token is UNAVAILABLE too, so it never caches as a miss.
     """
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    headers = {"User-Agent": USER_AGENT}
+    if auth:
+        headers["Authorization"] = f"Token {auth}"
+    request = urllib.request.Request(url, headers=headers)
     for attempt in range(tries):
         try:
             with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
@@ -221,3 +246,99 @@ def related_artist_names(
     if not identity or not identity.get("mbid"):
         return []
     return [r["name"] for r in related_artists(conn, identity["mbid"], sleep=sleep)[:limit] if r.get("name")]
+
+
+# --- track-level similarity (PLAN.md 7.12) ----------------------------------
+
+
+def resolve_recording(
+    conn: Any, title: str, artist: str | None, sleep: Callable[[float], None] = time.sleep
+) -> dict[str, Any] | None:
+    """Cached title+artist -> *canonical* recording MBID. None without a token.
+
+    Canonical is the whole point. Similarity is keyed on one recording per
+    song, and MusicBrainz search returns whichever of its duplicates scores
+    highest: 11 of Blinding Lights' 12 recording MBIDs have zero neighbours.
+    ListenBrainz's own lookup maps to the one that has them, but needs a user
+    token -- so no token means this source is off, not that nothing matched,
+    and nothing is cached.
+    """
+    auth = token()
+    song_key = match.song_key(title or "")
+    if not auth or not song_key or not artist or not artist.strip():
+        return None
+    artist_key = artist.strip().lower()
+
+    cached = graph_store.get_brainz_recording(conn, song_key, artist_key)
+    if cached is not None:
+        if cached["status"] != graph_store.STATUS_OK:
+            return None
+        return {"mbid": cached["mbid"], "title": cached["title"], "artist_name": cached["artist_name"]}
+
+    sleep(LB_THROTTLE)
+    query = urllib.parse.urlencode({"artist_name": artist.strip(), "recording_name": title.strip()})
+    payload = _get_safe(f"{LB_API}/metadata/lookup/?{query}", sleep=sleep, auth=auth)
+    if payload is UNAVAILABLE:
+        return None
+    # A miss is `{}` with a 200, not a 404.
+    hit = payload if isinstance(payload, dict) and payload.get("recording_mbid") else None
+    graph_store.put_brainz_recording(
+        conn,
+        song_key,
+        artist_key,
+        mbid=hit["recording_mbid"] if hit else None,
+        title=hit.get("recording_name") if hit else None,
+        artist_name=hit.get("artist_credit_name") if hit else None,
+        status=graph_store.STATUS_OK if hit else graph_store.STATUS_NO_MATCH,
+    )
+    if not hit:
+        return None
+    return {"mbid": hit["recording_mbid"], "title": hit.get("recording_name"), "artist_name": hit.get("artist_credit_name")}
+
+
+def similar_recordings(
+    conn: Any, mbid: str, sleep: Callable[[float], None] = time.sleep
+) -> list[dict[str, Any]]:
+    """Recordings similar to this canonical MBID, best first. Cached, including empty.
+
+    Unlike every other graph signal this one distinguishes two songs by the
+    same artist: Channa Mereya and Kesariya overlap 0.00 here against 0.90
+    artist-centrically. Coverage is thin on this library's Bollywood catalogue
+    (Kesariya: one neighbour) and dense on Western pop (Blinding Lights: 100).
+    """
+    if not mbid:
+        return []
+    if graph_store.was_fetched(conn, _EP_LB_SIMILAR_RECORDINGS, mbid):
+        return graph_store.get_brainz_similar_recordings(conn, mbid)
+
+    sleep(LB_THROTTLE)
+    payload = _get_safe(
+        f"{LB_LABS}/similar-recordings/json?recording_mbids={urllib.parse.quote(mbid)}"
+        f"&algorithm={LB_RECORDING_ALGORITHM}",
+        sleep=sleep,
+    )
+    if payload is UNAVAILABLE:
+        return []
+    rows = [
+        {
+            "mbid": row.get("recording_mbid"),
+            "title": row.get("recording_name"),
+            "artist_name": row.get("artist_credit_name"),
+            "score": row.get("score"),
+        }
+        for row in (payload if isinstance(payload, list) else [])
+        if isinstance(row, dict) and row.get("recording_mbid") and row.get("recording_name")
+    ]
+    graph_store.put_brainz_similar_recordings(conn, mbid, rows)
+    graph_store.record_fetch(conn, _EP_LB_SIMILAR_RECORDINGS, mbid, graph_store.STATUS_OK, len(rows))
+    return rows
+
+
+def similar_tracks(
+    conn: Any, title: str, artist: str | None, limit: int = 10, sleep: Callable[[float], None] = time.sleep
+) -> list[dict[str, Any]]:
+    """Seed song -> similar songs as title/artist text. The track source in one call."""
+    identity = resolve_recording(conn, title, artist, sleep=sleep)
+    if not identity:
+        return []
+    return similar_recordings(conn, identity["mbid"], sleep=sleep)[:limit]

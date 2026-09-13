@@ -25,9 +25,11 @@ class _FakeBrainz:
         self.routes = routes or {}
         self.fail = fail
         self.calls = []
+        self.auths = []
 
-    def __call__(self, url, tries=3, sleep=None):
+    def __call__(self, url, tries=3, sleep=None, auth=None):
         self.calls.append(url)
+        self.auths.append(auth)
         if self.fail:
             # The transport's own "could not ask" -- NOT a None, which at this
             # boundary means "asked, no answer" and is legitimately cacheable.
@@ -286,3 +288,126 @@ def test_graph_resolve_artist_caches_the_negative(graph_db, monkeypatch):
     assert graph.resolve_artist(graph_db, "Nobody", sleep=lambda _s: None) is None
     assert graph.resolve_artist(graph_db, "Nobody", sleep=lambda _s: None) is None
     assert len(deezer.calls) == 1
+
+
+# --- track-level similarity (PLAN.md 7.12) ----------------------------------
+
+TOKEN = "test-token"
+CHANNA_MBID = "e27ee5d7-703d-4985-a183-e5eef0020fb5"
+BULLEYA_MBID = "d238bda0-da14-4977-9e3d-a2fb276c31b8"
+
+TRACK_ROUTES = {
+    "metadata/lookup": {
+        "recording_mbid": CHANNA_MBID,
+        "recording_name": "Channa Mereya",
+        "artist_credit_name": "Arijit Singh",
+    },
+    "similar-recordings": [
+        {
+            "recording_mbid": BULLEYA_MBID,
+            "recording_name": "Bulleya",
+            "artist_credit_name": "Amit Mishra & Shilpa Rao",
+            "score": 23,
+        }
+    ],
+}
+
+
+def test_no_token_means_the_track_source_is_off_not_empty(graph_db, monkeypatch):
+    """Without a token the lookup 401s. That is "not configured", and caching
+    it as a miss would keep the source dark after a token is added."""
+    fake = _wire(monkeypatch, _FakeBrainz(TRACK_ROUTES))
+
+    assert brainz.resolve_recording(graph_db, "Channa Mereya", "Arijit Singh", sleep=lambda _s: None) is None
+    assert fake.calls == []
+    assert graph_store.get_brainz_recording(graph_db, "channamereya", "arijit singh") is None
+
+
+def test_resolve_recording_sends_the_token_and_caches(graph_db, monkeypatch):
+    monkeypatch.setenv("LISTENBRAINZ_TOKEN", TOKEN)
+    fake = _wire(monkeypatch, _FakeBrainz(TRACK_ROUTES))
+
+    first = brainz.resolve_recording(graph_db, "Channa Mereya", "Arijit Singh", sleep=lambda _s: None)
+    again = brainz.resolve_recording(graph_db, "Channa Mereya", "Arijit Singh", sleep=lambda _s: None)
+
+    assert first["mbid"] == again["mbid"] == CHANNA_MBID
+    assert len(fake.calls) == 1
+    assert fake.auths == [TOKEN]
+
+
+def test_resolve_recording_caches_the_empty_object_as_a_miss(graph_db, monkeypatch):
+    """A lookup miss is `{}` with a 200, measured -- not a 404."""
+    monkeypatch.setenv("LISTENBRAINZ_TOKEN", TOKEN)
+    fake = _wire(monkeypatch, _FakeBrainz({"metadata/lookup": {}}))
+
+    assert brainz.resolve_recording(graph_db, "No Such Song", "Nobody", sleep=lambda _s: None) is None
+    assert brainz.resolve_recording(graph_db, "No Such Song", "Nobody", sleep=lambda _s: None) is None
+    assert len(fake.calls) == 1
+
+
+def test_an_unauthorised_lookup_is_not_cached(graph_db, monkeypatch):
+    """A revoked or mistyped token surfaces as UNAVAILABLE; fixing it must work."""
+    monkeypatch.setenv("LISTENBRAINZ_TOKEN", "bad")
+    _wire(monkeypatch, _FakeBrainz(fail=True))
+    assert brainz.resolve_recording(graph_db, "Channa Mereya", "Arijit Singh", sleep=lambda _s: None) is None
+
+    _wire(monkeypatch, _FakeBrainz(TRACK_ROUTES))
+    assert brainz.resolve_recording(graph_db, "Channa Mereya", "Arijit Singh", sleep=lambda _s: None)["mbid"] == CHANNA_MBID
+
+
+def test_similar_recordings_caches_including_empty(graph_db, monkeypatch):
+    fake = _wire(monkeypatch, _FakeBrainz({"similar-recordings": []}))
+
+    assert brainz.similar_recordings(graph_db, "some-mbid", sleep=lambda _s: None) == []
+    assert brainz.similar_recordings(graph_db, "some-mbid", sleep=lambda _s: None) == []
+    assert len(fake.calls) == 1
+
+
+def test_similar_recordings_uses_the_recording_algorithm_not_the_artist_one(graph_db, monkeypatch):
+    """The artist algorithm name is a 400 here -- the bug that twice made this
+    endpoint look empty."""
+    fake = _wire(monkeypatch, _FakeBrainz(TRACK_ROUTES))
+
+    rows = brainz.similar_recordings(graph_db, CHANNA_MBID, sleep=lambda _s: None)
+
+    assert [r["title"] for r in rows] == ["Bulleya"]
+    assert f"algorithm={brainz.LB_RECORDING_ALGORITHM}" in fake.calls[0]
+    assert brainz.LB_ALGORITHM not in fake.calls[0]
+
+
+def test_neighbours_tags_track_level_candidates_distinctly(graph_db, monkeypatch):
+    monkeypatch.setenv("LISTENBRAINZ_TOKEN", TOKEN)
+    monkeypatch.setattr(graph, "_get", _FakeDeezer({
+        "q=Bulleya": {"data": [_dz_track(7001, "Bulleya", "Amit Mishra", 300)]},
+        "/artist/100/top": {"data": [_dz_track(1, "Channa Mereya", "Pritam", 100)]},
+    }))
+    fake = _wire(monkeypatch, _FakeBrainz(TRACK_ROUTES))
+
+    rows = graph.neighbours(
+        graph_db,
+        {"id": 1, "title": "Channa Mereya", "artist_id": 100, "artist_name": "Pritam"},
+        include_radio=False,
+        brainz_artist="Arijit Singh",
+        sleep=lambda _s: None,
+    )
+
+    assert {r["title"]: r["source"] for r in rows}.get("Bulleya") == "graph_similar_lb"
+    # The provider's credit, not Deezer's composer credit, is what is looked up.
+    lookup = next(u for u in fake.calls if "metadata/lookup" in u)
+    assert "Arijit" in lookup and "Pritam" not in lookup
+
+
+def test_neighbours_never_returns_the_seed_as_its_own_similar_track(graph_db, monkeypatch):
+    monkeypatch.setenv("LISTENBRAINZ_TOKEN", TOKEN)
+    monkeypatch.setattr(graph, "_get", _FakeDeezer({
+        "q=Bulleya": {"data": [_dz_track(1, "Bulleya", "Amit Mishra", 300)]},
+    }))
+    _wire(monkeypatch, _FakeBrainz(TRACK_ROUTES))
+
+    rows = graph.neighbours(
+        graph_db,
+        {"id": 1, "title": "Channa Mereya", "artist_id": 100, "artist_name": "Arijit Singh"},
+        include_radio=False,
+        sleep=lambda _s: None,
+    )
+    assert all(r["id"] != 1 for r in rows)

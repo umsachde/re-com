@@ -377,6 +377,38 @@ def _brainz_related_ids(
     return out
 
 
+def _brainz_similar_tracks(
+    conn: Any,
+    title: str | None,
+    artist_name: str | None,
+    want: int,
+    sleep: Callable[[float], None],
+) -> list[dict[str, Any]]:
+    """ListenBrainz track-level neighbours, resolved to Deezer track rows.
+
+    The same supplement contract as `_brainz_related_ids`: no token, no
+    coverage or a failure all degrade to nothing, never an error.
+    """
+    if not title or not artist_name:
+        return []
+    try:
+        import brainz  # local: keeps the second source optional at import time
+
+        similar = brainz.similar_tracks(conn, title, artist_name, limit=want, sleep=sleep)
+    except Exception:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for rec in similar:
+        try:
+            resolved = resolve(conn, rec["title"], rec.get("artist_name"), sleep=sleep)
+        except Exception:
+            continue
+        if resolved and resolved.get("id"):
+            out.append(resolved)
+    return out
+
+
 def neighbours(
     conn: Any,
     seed: dict[str, Any],
@@ -385,6 +417,7 @@ def neighbours(
     per_artist: int = 10,
     include_radio: bool = True,
     brainz_to_expand: int = 3,
+    brainz_tracks: int = 10,
     brainz_artist: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[dict[str, Any]]:
@@ -442,5 +475,12 @@ def neighbours(
     lb_seed = brainz_artist or seed.get("artist_name")
     for rel in _brainz_related_ids(conn, lb_seed, brainz_to_expand, expanded, sleep):
         add(artist_tracks(conn, rel["id"], KIND_TOP, sleep=sleep), "graph_related_lb")
+
+    # Track-level similarity (PLAN.md 7.12): the only signal here that tells two
+    # songs by one artist apart. Deezer's title is the cleaner query; the
+    # provider's credit is the right artist, for the composer reason above.
+    for row in _brainz_similar_tracks(conn, seed.get("title"), lb_seed, brainz_tracks, sleep):
+        if row["id"] != seed_track_id:
+            out.append({**row, "source": "graph_similar_lb"})
 
     return out

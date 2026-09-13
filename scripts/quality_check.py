@@ -129,7 +129,7 @@ SIMILARITY_SEEDS = GRAPH_SEEDS_WESTERN + GRAPH_SEEDS_SOUTH_ASIAN
 
 # The sources graph.neighbours tags its rows with. A candidate's score counts
 # distinct (seed, source) pairs, so the ceiling depends on the backend AND on
-# the seed count: 7 per seed on YouTube, 4 on Spotify, whose capabilities()
+# the seed count: 8 per seed on YouTube, 5 on Spotify, whose capabilities()
 # returns the empty set by measurement rather than pessimism. A raw mean read
 # without that ceiling would report arithmetic as a regression.
 #
@@ -138,7 +138,7 @@ SIMILARITY_SEEDS = GRAPH_SEEDS_WESTERN + GRAPH_SEEDS_SOUTH_ASIAN
 # 87% of Spotify's picks rested on a single signal; if the ceiling stayed at 3
 # while a fourth source started contributing, that number would improve partly
 # by arithmetic and the measurement would be flattering itself.
-GRAPH_SOURCES = ("graph_artist", "graph_radio", "graph_related", "graph_related_lb")
+GRAPH_SOURCES = ("graph_artist", "graph_radio", "graph_related", "graph_related_lb", "graph_similar_lb")
 
 
 def _source_ceiling(yt, graph_conn) -> int:
