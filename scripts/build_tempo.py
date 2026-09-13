@@ -57,7 +57,8 @@ def main() -> int:
     def progress(p):
         if p["index"] % 50 == 0:
             print(f"  {p['index']:5d}/{len(rows):<5d} {p['resolved']:5d} with BPM  "
-                  f"{p['no_bpm']:5d} no tempo  {p['no_match']:4d} unmatched", flush=True)
+                  f"{p['no_bpm']:5d} no tempo  {p['no_match']:4d} unmatched  "
+                  f"{p['unavailable']:4d} unavailable (retried next run)", flush=True)
 
     stats = tempo.backfill(conn, rows, on_progress=progress)
     print(f"\ndone in {(time.time() - started) / 60:.1f}m: {stats}")

@@ -211,7 +211,8 @@ def track_detail(track_id: int, sleep: Callable[[float], None] = time.sleep) -> 
     """Full track record, including the `bpm` field `tempo.py` wants."""
     sleep(THROTTLE)
     detail = _get_safe(f"{API}/track/{track_id}")
-    return detail if isinstance(detail, dict) else None
+    # Deezer reports quota and other errors as a 200 with an error body.
+    return detail if isinstance(detail, dict) and "error" not in detail else None
 
 
 def _keys(title: str, artist: str | None) -> tuple[str, str]:
