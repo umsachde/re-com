@@ -305,3 +305,62 @@ def test_graph_db_is_not_scoped_per_provider(monkeypatch):
     monkeypatch.setenv("RECOM_PROVIDER", "spotify")
     assert provider.scoped_path(graph_store.DEFAULT_DB_PATH) != graph_store.DEFAULT_DB_PATH
     assert graph_store.DEFAULT_DB_PATH.name == "graph.db"
+
+
+# --- "could not ask" is not "asked, nothing there" --------------------------
+
+QUOTA = {"error": {"type": "Exception", "message": "Quota limit exceeded", "code": 4}}
+NO_DATA = {"error": {"type": "DataException", "message": "no data", "code": 800}}
+
+
+def test_a_failed_resolve_is_not_cached_as_a_miss(graph_db, monkeypatch):
+    """One network blip must not mark a song as absent from Deezer forever."""
+    _wire(monkeypatch, _FakeDeezer(fail=True))
+    assert graph.resolve(graph_db, "Excuses", "AP Dhillon", sleep=lambda _s: None) is None
+    assert graph_store.get_resolution(graph_db, "excuses", "ap dhillon") is None
+
+    _wire(monkeypatch, _FakeDeezer({"/search": {"data": [_track(1, "Excuses", "AP Dhillon")]}}))
+    assert graph.resolve(graph_db, "Excuses", "AP Dhillon", sleep=lambda _s: None)["id"] == 1
+
+
+def test_a_quota_error_resolve_is_not_cached_as_a_miss(graph_db, monkeypatch):
+    """Deezer reports its rate limit as a 200 with an error body, not an HTTP error."""
+    _wire(monkeypatch, _FakeDeezer({"/search": QUOTA}))
+    assert graph.resolve(graph_db, "Excuses", "AP Dhillon", sleep=lambda _s: None) is None
+    assert graph_store.get_resolution(graph_db, "excuses", "ap dhillon") is None
+
+
+def test_a_no_data_error_is_still_a_cacheable_miss(graph_db, monkeypatch):
+    """Code 800 is Deezer's real "nothing here" and must keep its negative cache."""
+    fake = _wire(monkeypatch, _FakeDeezer({"/artist/5/related": NO_DATA}))
+    assert graph.related_artists(graph_db, 5, sleep=lambda _s: None) == []
+    assert graph.related_artists(graph_db, 5, sleep=lambda _s: None) == []
+    assert len(fake.calls) == 1
+
+
+def test_a_failed_artist_lookup_is_not_cached(graph_db, monkeypatch):
+    _wire(monkeypatch, _FakeDeezer({"/search/artist": QUOTA}))
+    assert graph.resolve_artist(graph_db, "Shubh", sleep=lambda _s: None) is None
+    assert graph_store.get_artist_lookup(graph_db, "shubh") is None
+
+
+def test_failed_related_artists_are_not_recorded_as_fetched(graph_db, monkeypatch):
+    _wire(monkeypatch, _FakeDeezer(fail=True))
+    assert graph.related_artists(graph_db, 5, sleep=lambda _s: None) == []
+    assert not graph_store.was_fetched(graph_db, graph._EP_RELATED, 5)
+
+
+def test_failed_artist_tracks_are_not_recorded_as_fetched(graph_db, monkeypatch):
+    _wire(monkeypatch, _FakeDeezer({"/artist/5/top": QUOTA}))
+    assert graph.artist_tracks(graph_db, 5, graph.KIND_TOP, sleep=lambda _s: None) == []
+    assert not graph_store.was_fetched(graph_db, graph._EP_TOP, 5)
+
+
+def test_a_partly_failed_resolve_returns_its_guess_without_caching_it(graph_db, monkeypatch):
+    """The artist-qualified search failed, so a title-only hit is not settled identity."""
+    _wire(monkeypatch, _FakeDeezer({
+        "q=Excuses%20AP": QUOTA,
+        "q=Excuses&": {"data": [_track(1, "Excuses", "Somebody Else")]},
+    }))
+    assert graph.resolve(graph_db, "Excuses", "AP Dhillon", sleep=lambda _s: None)["id"] == 1
+    assert graph_store.get_resolution(graph_db, "excuses", "ap dhillon") is None

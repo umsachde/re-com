@@ -100,7 +100,7 @@ def test_lookup_reports_no_match_on_an_empty_search(monkeypatch):
 
 def test_lookup_survives_a_network_failure(monkeypatch):
     _wire(monkeypatch, _FakeDeezer(fail=True))
-    assert tempo.lookup("T", "X", sleep=lambda _s: None)[1] == tempo.STATUS_NO_MATCH
+    assert tempo.lookup("T", "X", sleep=lambda _s: None)[1] == tempo.STATUS_UNAVAILABLE
 
 
 def test_lookup_without_a_title_makes_no_request(monkeypatch):
@@ -133,6 +133,44 @@ def test_a_missing_tempo_is_cached_too(db, monkeypatch):
     assert tempo.get_or_fetch(db, "v1", "T", "X", sleep=lambda _s: None) is None
     assert len(fake.calls) == before
     assert store.get_tempo(db, "v1")["status"] == tempo.STATUS_NO_BPM
+
+
+def test_a_failed_search_is_not_cached_as_no_match(db, monkeypatch):
+    """A network blip must not mark a song as absent from Deezer forever."""
+    _wire(monkeypatch, _FakeDeezer(fail=True))
+    assert tempo.get_or_fetch(db, "v1", "T", "X", sleep=lambda _s: None) is None
+    assert store.get_tempo(db, "v1") is None
+
+    _wire(monkeypatch, _FakeDeezer(results=[{"id": 1, "artist": {"name": "X"}}], tracks={1: {"bpm": 100.0}}))
+    assert tempo.get_or_fetch(db, "v1", "T", "X", sleep=lambda _s: None) == 100.0
+
+
+def test_a_failed_track_detail_is_not_cached_as_no_bpm(db, monkeypatch):
+    """The song matched but its detail could not be fetched: its tempo is unknown, not absent."""
+    quota = {"error": {"type": "Exception", "message": "Quota limit exceeded", "code": 4}}
+    _wire(monkeypatch, _FakeDeezer(results=[{"id": 1, "artist": {"name": "X"}}], tracks={1: quota}))
+    assert tempo.get_or_fetch(db, "v1", "T", "X", sleep=lambda _s: None) is None
+    assert store.get_tempo(db, "v1") is None
+
+
+def test_a_quota_error_search_is_not_cached(db, monkeypatch):
+    quota = {"error": {"type": "Exception", "message": "Quota limit exceeded", "code": 4}}
+
+    class _Quota(_FakeDeezer):
+        def __call__(self, url):
+            self.calls.append(url)
+            return quota
+
+    _wire(monkeypatch, _Quota())
+    assert tempo.get_or_fetch(db, "v1", "T", "X", sleep=lambda _s: None) is None
+    assert store.get_tempo(db, "v1") is None
+
+
+def test_backfill_counts_but_does_not_cache_unavailable_songs(db, monkeypatch):
+    _wire(monkeypatch, _FakeDeezer(fail=True))
+    rows = [{"video_id": "v1", "title": "T", "artists": "X"}]
+    assert tempo.backfill(db, rows, sleep=lambda _s: None)["unavailable"] == 1
+    assert store.get_tempo(db, "v1") is None
 
 
 def test_backfill_skips_songs_already_attempted(db, monkeypatch):

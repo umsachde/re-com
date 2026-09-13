@@ -39,6 +39,7 @@ MAX_CANDIDATES = graph.MAX_CANDIDATES
 STATUS_OK = "ok"
 STATUS_NO_BPM = "no_bpm"      # matched the song; Deezer has no tempo for it
 STATUS_NO_MATCH = "no_match"  # nothing on Deezer resembling this song
+STATUS_UNAVAILABLE = "unavailable"  # Deezer could not be asked; never cached
 
 # Credit/title matching lives in match.py -- shared with signals.py and, from
 # v6, with the music graph, which compares Deezer credits against provider
@@ -61,9 +62,9 @@ def lookup(title: str, artist: str | None = None, sleep=time.sleep) -> tuple[flo
     if not title:
         return None, STATUS_NO_MATCH, None
 
-    rows = graph.search_tracks(title, artist, sleep=sleep)
+    rows, complete = graph._search_tracks(title, artist, sleep)
     if not rows:
-        return None, STATUS_NO_MATCH, None
+        return None, (STATUS_NO_MATCH if complete else STATUS_UNAVAILABLE), None
 
     matching = [r for r in rows if r.get("matched")]
 
@@ -74,11 +75,15 @@ def lookup(title: str, artist: str | None = None, sleep=time.sleep) -> tuple[flo
     for hit in matching:
         detail = graph.track_detail(hit["id"], sleep=sleep)
         if detail is None:
+            complete = False
             continue
         bpm = detail.get("bpm")
         if bpm:
             return float(bpm), STATUS_OK, hit["id"]
 
+    # Without every answer, "no tempo" or "no match" could be a failure's shadow.
+    if not complete:
+        return None, STATUS_UNAVAILABLE, first_id
     return None, (STATUS_NO_BPM if matching else STATUS_NO_MATCH), first_id
 
 
@@ -86,14 +91,16 @@ def get_or_fetch(conn: Any, video_id: str, title: str, artist: str | None, sleep
     """Cached tempo, hitting Deezer only on a genuine first look.
 
     Negative results are cached too -- rediscovering that Deezer has no tempo
-    for a song costs two requests every time otherwise.
+    for a song costs two requests every time otherwise. A failed lookup is not
+    a negative result, so it is not cached and the next call asks again.
     """
     cached = store.get_tempo(conn, video_id)
     if cached is not None:
         return cached["bpm"]
 
     bpm, status, deezer_id = lookup(title, artist, sleep=sleep)
-    store.put_tempo(conn, video_id, bpm, status, deezer_id)
+    if status != STATUS_UNAVAILABLE:
+        store.put_tempo(conn, video_id, bpm, status, deezer_id)
     return bpm
 
 
@@ -134,14 +141,15 @@ def in_range(bpm: float | None, low: float | None, high: float | None) -> bool |
 
 def backfill(conn: Any, rows: Iterable[dict[str, Any]], sleep=time.sleep, on_progress=None) -> dict[str, int]:
     """Resolve tempo for many songs, skipping anything already attempted."""
-    stats = {"resolved": 0, "no_bpm": 0, "no_match": 0, "cached": 0}
+    stats = {"resolved": 0, "no_bpm": 0, "no_match": 0, "unavailable": 0, "cached": 0}
     for index, row in enumerate(rows, start=1):
         video_id = row["video_id"]
         if store.get_tempo(conn, video_id) is not None:
             stats["cached"] += 1
             continue
         bpm, status, deezer_id = lookup(row.get("title"), row.get("artists"), sleep=sleep)
-        store.put_tempo(conn, video_id, bpm, status, deezer_id)
+        if status != STATUS_UNAVAILABLE:
+            store.put_tempo(conn, video_id, bpm, status, deezer_id)
         stats["resolved" if status == STATUS_OK else status] += 1
         if on_progress:
             on_progress({**stats, "index": index, "title": row.get("title"), "bpm": bpm})

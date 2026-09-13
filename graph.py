@@ -105,6 +105,34 @@ def _data(payload: Any) -> list[dict[str, Any]]:
     return rows if isinstance(rows, list) else []
 
 
+# Deezer's "no data" error code: a real, cacheable miss.
+_DEEZER_NO_DATA = 800
+
+
+def _rows(url: str) -> list[dict[str, Any]] | None:
+    """Rows for a cached lookup, or None when Deezer could not be asked.
+
+    Every cache in this module stores negative answers on purpose, so the one
+    thing a caller must never do is cache a *failure* as one. Deezer signals
+    its quota as a 200 with an error body (code 4), not an HTTP error, so a
+    burst of lookups -- several seeds at once, each resolving neighbours --
+    used to write "not on Deezer" permanently for songs that are. Only code
+    800 and an empty `data` list mean nothing is there.
+    """
+    try:
+        payload = _get(url)
+    except _NET_ERRORS:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if error is not None:
+        code = error.get("code") if isinstance(error, dict) else None
+        return [] if code == _DEEZER_NO_DATA else None
+    rows = payload.get("data")
+    return rows if isinstance(rows, list) else None
+
+
 # --- track identity ---------------------------------------------------------
 
 
@@ -141,35 +169,50 @@ def search_tracks(title: str, artist: str | None = None, sleep: Callable[[float]
     no-match status. Callers that need real identity -- `resolve`, and every
     graph signal -- must use only `matched=True` rows.
     """
-    if not title:
-        return []
+    return _search_tracks(title, artist, sleep)[0]
 
-    hits = _search(f"{title} {artist}".strip(), sleep) if artist else []
+
+def _search_tracks(
+    title: str, artist: str | None, sleep: Callable[[float], None]
+) -> tuple[list[dict[str, Any]], bool]:
+    """`search_tracks` plus whether every search it needed actually got an answer."""
+    if not title:
+        return [], True
+
+    complete = True
+    hits: list[dict[str, Any]] = []
+    if artist:
+        found = _search(f"{title} {artist}".strip(), sleep)
+        complete = found is not None
+        hits = found or []
     matching = [h for h in hits if match.artist_matches((h.get("artist") or {}).get("name", ""), artist)]
 
     if not matching:
-        for hit in _search(title, sleep):
+        fallback = _search(title, sleep)
+        complete = complete and fallback is not None
+        for hit in fallback or []:
             if match.same_title(hit.get("title"), title):
                 matching.append(hit)
 
     rows = [{**_track_row(h), "matched": True} for h in matching]
     if not matching and hits:
         rows.append({**_track_row(hits[0]), "matched": False})
-    return rows
+    return rows, complete
 
 
-def _search(query: str, sleep: Callable[[float], None]) -> list[dict[str, Any]]:
+def _search(query: str, sleep: Callable[[float], None]) -> list[dict[str, Any]] | None:
     if not query.strip():
         return []
     encoded = urllib.parse.quote(query.strip()[:180])
-    return _data(_get_safe(f"{API}/search?q={encoded}&limit={MAX_CANDIDATES}"))
+    return _rows(f"{API}/search?q={encoded}&limit={MAX_CANDIDATES}")
 
 
 def track_detail(track_id: int, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any] | None:
     """Full track record, including the `bpm` field `tempo.py` wants."""
     sleep(THROTTLE)
     detail = _get_safe(f"{API}/track/{track_id}")
-    return detail if isinstance(detail, dict) else None
+    # Deezer reports quota and other errors as a 200 with an error body.
+    return detail if isinstance(detail, dict) and "error" not in detail else None
 
 
 def _keys(title: str, artist: str | None) -> tuple[str, str]:
@@ -201,8 +244,13 @@ def resolve(
         }
 
     # Only credit-matched rows are real identity -- see search_tracks.
-    hits = [h for h in search_tracks(title, artist, sleep=sleep) if h.get("matched")]
+    rows, complete = _search_tracks(title, artist, sleep)
+    hits = [h for h in rows if h.get("matched")]
     best = hits[0] if hits else None
+    if not complete:
+        # A partial answer is neither a miss nor settled identity: the failed
+        # artist-qualified search might have matched better than a title-only one.
+        return best
     graph_store.put_resolution(
         conn,
         song_key,
@@ -239,11 +287,10 @@ def resolve_artist(
 
     sleep(THROTTLE)
     encoded = urllib.parse.quote(artist.strip()[:180])
-    best = next(
-        (h for h in _data(_get_safe(f"{API}/search/artist?q={encoded}&limit=5"))
-         if match.artist_matches(h.get("name"), artist)),
-        None,
-    )
+    found = _rows(f"{API}/search/artist?q={encoded}&limit=5")
+    if found is None:
+        return None
+    best = next((h for h in found if match.artist_matches(h.get("name"), artist)), None)
     graph_store.put_artist_lookup(
         conn,
         artist_key,
@@ -273,11 +320,10 @@ def related_artists(
         return graph_store.get_related_artists(conn, artist_id)
 
     sleep(THROTTLE)
-    rows = [
-        {"id": a.get("id"), "name": a.get("name")}
-        for a in _data(_get_safe(f"{API}/artist/{artist_id}/related"))
-        if a.get("id")
-    ]
+    found = _rows(f"{API}/artist/{artist_id}/related")
+    if found is None:
+        return []
+    rows = [{"id": a.get("id"), "name": a.get("name")} for a in found if a.get("id")]
     graph_store.put_related_artists(conn, artist_id, rows)
     graph_store.record_fetch(conn, _EP_RELATED, artist_id, graph_store.STATUS_OK, len(rows))
     return rows
@@ -307,7 +353,10 @@ def artist_tracks(
 
     sleep(THROTTLE)
     path = "radio" if kind == KIND_RADIO else f"top?limit={limit}"
-    rows = [_track_row(t) for t in _data(_get_safe(f"{API}/artist/{artist_id}/{path}")) if t.get("id")]
+    found = _rows(f"{API}/artist/{artist_id}/{path}")
+    if found is None:
+        return []
+    rows = [_track_row(t) for t in found if t.get("id")]
     graph_store.put_artist_tracks(conn, artist_id, kind, rows)
     graph_store.record_fetch(conn, endpoint, artist_id, graph_store.STATUS_OK, len(rows))
     return rows
