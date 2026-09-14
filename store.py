@@ -11,6 +11,7 @@ stays as its own JSON file (see server.py) -- it works, it's tested, and
 rewriting it into SQLite purely for tidiness isn't worth the churn yet.
 """
 
+import json
 import os
 import sqlite3
 import time
@@ -840,4 +841,63 @@ def genre_stats(conn: sqlite3.Connection) -> dict[str, Any]:
                 "SELECT genre, COUNT(*) AS n FROM genre_membership GROUP BY genre ORDER BY n DESC"
             )
         },
+    }
+
+
+# --- maintenance (PLAN.md 7.4) -----------------------------------------------
+
+
+def coverage_snapshot(conn: sqlite3.Connection, graph_coverage: dict[str, Any] | None = None) -> dict[str, float]:
+    """A flat, all-numeric slice of the index worth trending over time.
+
+    Deliberately not the full `index_status()` payload -- `by_source` and
+    `moods` breakdowns are for a human reading one report, not for diffing
+    across runs. Flat and numeric so `maintenance_status`'s trend is a plain
+    subtraction, no per-field diff logic to keep in sync as fields change.
+    """
+    import label  # local: label imports store, so this avoids a cycle at module load
+
+    lib = label.library_coverage(conn)
+    tempo = tempo_stats(conn)
+    snapshot = {
+        "library_coverage": lib["coverage"],
+        "library_labelled": float(lib["labelled"]),
+        "atlas_unique_tracks": float(atlas_stats(conn)["unique_tracks"]),
+        "tempo_coverage": tempo["coverage"],
+        "genre_tracks": float(genre_stats(conn)["tracks"]),
+    }
+    if graph_coverage:
+        snapshot.update({f"graph_{k}": float(v) for k, v in graph_coverage.items()})
+    return snapshot
+
+
+def record_maintenance_run(conn: sqlite3.Connection, snapshot: dict[str, float], stages: dict[str, Any]) -> None:
+    """Persist what `scripts/maintain.py` found, for `index_status`'s staleness/trend report.
+
+    `stages` is per-stage outcome (ran/skipped/failed and its own stats), kept
+    verbatim rather than merged into `snapshot` -- a stage that failed silently
+    stopping coverage from growing is a different fact from coverage simply
+    being flat, and the report should be able to say which.
+    """
+    set_meta(conn, "maintain_last_run_at", str(time.time()))
+    set_meta(conn, "maintain_last_snapshot", json.dumps(snapshot))
+    set_meta(conn, "maintain_last_stages", json.dumps(stages))
+
+
+def maintenance_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """How long since `scripts/maintain.py` last ran, and what it found then.
+
+    Staleness first (a maintenance job nobody runs is worse than none, because
+    it looks like an index that's still self-maintaining) and the last
+    snapshot second, so `index_status` can diff it against the live numbers
+    and report trend instead of only a total.
+    """
+    last_at = get_meta(conn, "maintain_last_run_at")
+    snapshot_raw = get_meta(conn, "maintain_last_snapshot")
+    stages_raw = get_meta(conn, "maintain_last_stages")
+    return {
+        "last_run_at": float(last_at) if last_at else None,
+        "stale_hours": round((time.time() - float(last_at)) / 3600, 1) if last_at else None,
+        "snapshot": json.loads(snapshot_raw) if snapshot_raw else None,
+        "last_stages": json.loads(stages_raw) if stages_raw else None,
     }

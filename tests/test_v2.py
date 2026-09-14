@@ -351,6 +351,48 @@ def test_coverage_by_language_is_empty_for_an_empty_library(db):
     assert label.library_coverage_by_language(db) == {}
 
 
+# --- maintenance (PLAN.md 7.4) ----------------------------------------------
+
+
+def test_coverage_snapshot_is_flat_and_numeric(db):
+    store.sync_library(db, [("a", "Liked Music", True)])
+    store.put_track_moods(db, "atlas", [("a", ms.ANCHORS["Sad"], 0.5)])
+    snapshot = store.coverage_snapshot(db)
+    assert snapshot["library_coverage"] == 1.0
+    assert snapshot["library_labelled"] == 1.0
+    assert all(isinstance(v, float) for v in snapshot.values())
+
+
+def test_coverage_snapshot_includes_graph_numbers_when_given(db):
+    snapshot = store.coverage_snapshot(db, graph_coverage={"tracks": 5, "queries_crawled": 2})
+    assert snapshot["graph_tracks"] == 5.0
+    assert snapshot["graph_queries_crawled"] == 2.0
+
+
+def test_maintenance_status_before_any_run_is_all_none(db):
+    status = store.maintenance_status(db)
+    assert status == {"last_run_at": None, "stale_hours": None, "snapshot": None, "last_stages": None}
+
+
+def test_record_maintenance_run_is_readable_back(db):
+    snapshot = {"library_coverage": 0.5}
+    stages = {"tempo": {"status": "ok", "resolved": 3}}
+    store.record_maintenance_run(db, snapshot, stages)
+
+    status = store.maintenance_status(db)
+    assert status["last_run_at"] is not None
+    assert status["stale_hours"] == 0.0
+    assert status["snapshot"] == snapshot
+    assert status["last_stages"] == stages
+
+
+def test_maintenance_status_reflects_time_since_the_last_run(db, monkeypatch):
+    store.record_maintenance_run(db, {}, {})
+    real_time = store.time.time
+    monkeypatch.setattr(store.time, "time", lambda: real_time() + 3600 * 5)
+    assert store.maintenance_status(db)["stale_hours"] == pytest.approx(5.0, abs=0.01)
+
+
 # --- recommend -------------------------------------------------------------
 
 
@@ -1280,6 +1322,22 @@ def test_index_status_reports_coverage_and_llm_availability(wired):
     status = server.index_status()
     assert status["library"]["coverage"] == 1.0
     assert "available" in status["llm_labelling"]
+
+
+def test_index_status_maintenance_says_it_never_ran(wired):
+    server, db, _ = wired
+    assert server.index_status()["maintenance"]["last_run_at"] is None
+
+
+def test_index_status_maintenance_reports_trend_after_a_run(wired):
+    server, db, _ = wired
+    store.record_maintenance_run(db, store.coverage_snapshot(db), {})
+    _library(db, ("seed", "Seeder", "Sad"))
+    store.put_track_moods(db, "atlas", [("seed", ms.ANCHORS["Sad"], 0.5)])
+
+    maintenance = server.index_status()["maintenance"]
+    assert maintenance["last_run_at"] is not None
+    assert maintenance["trend_since_last_run"]["library_coverage"] == pytest.approx(1.0)
 
 
 def test_build_records_the_identity_of_what_it_served(db):

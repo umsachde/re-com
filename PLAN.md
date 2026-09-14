@@ -738,16 +738,59 @@ it justified the source on measured *independence* and then expected *corroborat
 are opposites. Independent sources name different artists, and their tracks arrive as new
 single-source candidates rather than as second votes. Read §7.10 before citing anything here.
 
-### 7.4 Continuous indexing
+### 7.4 Continuous indexing — *done*
 
 Coverage is the quality ceiling (§3) and it is crawl-bound: the measurement says growing it
-means crawling more of Deezer, not resolving better. Yet every crawl is a manual one-shot
-script, so an install's index is as good as the last time someone remembered.
+means crawling more of Deezer, not resolving better. Yet every crawl was a manual one-shot
+script, so an install's index was as good as the last time someone remembered.
 
-Proposed: one `scripts/maintain.py` on cron that tops up the graph atlas, tempo and labels
-for anything new since the last run, and an `index_status()` that reports staleness and
-trend rather than only totals. It turns a 45-minute setup burden into a self-maintaining
-index.
+**Built 2026-09-13.** `scripts/maintain.py` runs, in order, the four things worth topping up
+on a schedule: library sync + atlas materialize + artist propagation (provider-neutral,
+always), YouTube's editorial mood atlas and genre pages (YouTube only, skipped elsewhere with
+a stated reason), the Deezer tempo backfill, and the shared graph atlas's crawl/materialize/
+propagate. Each stage was already independently resumable (`build_atlas.py`,
+`build_graph_atlas.py` and `build_tempo.py` all skip what they've already attempted) — the
+thing actually missing was one script that calls them in order, catches one stage's failure
+without losing the others (the same silent-degradation contract `graph.neighbours` already
+holds `graph_related_lb`/`graph_similar_lb`/`graph_similar_lfm` to), and says honestly what
+ran. Bounded by default (`DEFAULT_ATLAS_LIMIT` etc.) so a scheduled run stays short; `--full`
+lifts the caps for a deliberate catch-up.
+
+`index_status()` now reports a `maintenance` block: when `scripts/maintain.py` last ran, and
+the coverage delta since then (`trend_since_last_run`), rather than only the current totals —
+so a stalled cron job is visible instead of looking like a self-maintaining index that happens
+to be flat. `store.coverage_snapshot`/`record_maintenance_run`/`maintenance_status` hold the
+bookkeeping (a flat, all-numeric slice in `meta`, the same key-value table `atlas.py` already
+uses for `atlas_last_crawl_at`), covered by `tests/test_v2.py`.
+
+Not yet done: actually installing the cron line anywhere, and `label_library.py`'s Claude
+pass (step 4) is deliberately left out of the schedule — it costs money per song and should
+stay an explicit, opted-into run rather than something a cron job does unattended.
+
+**First live run, 2026-09-13, against the YouTube backend.** All ten stages ran clean on the
+first pass: 24 playlists synced, the YouTube atlas fully up to date already (0 new, all 1,979
+listings previously crawled), 27 genres re-harvested in 4.5m, 66 new tempo lookups, and the
+shared graph atlas fully caught up (0 new queries — its 231 had already been crawled).
+`graph_propagate` relabelled 427 tracks from the shared graph and left 1,150 resolved-but-
+moodless and 205 unresolved, both worth narrowing later but not new to this work.
+
+The run's own trend report immediately misreported itself: `_report_status` read back the
+snapshot `record_maintenance_run` had *just written*, so every field showed the run diffed
+against itself and printed a misleading flat `+0.0000` regardless of what had actually moved.
+Fixed by capturing the previous snapshot before recording the new one, not after — verified
+on a second live run, which correctly showed `genre_tracks +140` (from `build_genres.py`'s own
+top-N playlist resampling) against a flat `+0.0000` everywhere the second pass genuinely found
+nothing new. The exact failure mode §6.5 named: this is a case a mocked/unit-tested version of
+`_report_status` would not have surfaced, because the bug is in the sequencing between two real
+writes to the same store, not in either write's own correctness.
+
+Review then caught a second, quieter one that the second live run had already shown without
+anyone reading it: `tempo: cached=400, resolved=0`. The bounded run truncated the library to
+400 rows *before* skipping already-attempted ones, so every scheduled run re-checked the same
+400 and 215 tracks were unreachable forever. Filtered to never-attempted rows first; the third
+live run attempted all 217 pending (96 with BPM), `tempo_coverage +0.0098`. The same review
+moved the provider client, `YTMusic` and graph connection inside their stages, so an
+unconfigured backend costs its own stage rather than the whole run and its record.
 
 ### 7.5 Close the read-only handoff gap
 
