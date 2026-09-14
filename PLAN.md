@@ -535,7 +535,9 @@ Dead candidates are dropped and the arc re-sequenced, up to `_RESOLVE_ROUNDS`.
 
 ## 7. Roadmap
 
-Ranked by what the project actually needs, not by size. Item 1 is done; the rest are open.
+Ranked by what the project actually needs, not by size, as of when each item was written;
+numbered in the order items were added. Open: 7.6, 7.7, 7.8, 7.9, 7.16. Everything else is done
+or closed with its result recorded.
 
 ### 7.1 Verification across tools × backends — *done*
 
@@ -843,74 +845,6 @@ in the library could come back through it, and after this change so could just-s
 library half predates §7.5 and was on `main`; it only surfaced because "every tool honours the
 served set" made someone trace every path that produces a song. The tool's full exclusion set,
 plus the seed, now reaches the bridge, pinned by a test that fails without it.
-
-### 7.15 Break score ties on evidence, not the alphabet — *done; better picks, somewhat more seed-artist concentration*
-
-`signals._finalize` sorted on `(-score, title)`. Measured 2026-09-14 on *Excuses*: 27 of the top
-30 candidates tie at score 1, so the title tie-break decides almost the whole list. Proposed:
-a secondary key from each candidate's best rank within the source that surfaced it, then title
-only as a final deterministic fallback. That rank is not stored today — `_merge_and_score` keeps
-only the source set and a count — but the merged dict is built in each source's own order, and
-Python's sort is stable, so recording first-seen position at merge time is cheap; it is the title
-key that currently throws it away. Measure with
-`quality_check.py --similarity` before and after; nothing about it should change the top of a
-well-corroborated result.
-
-**Built 2026-09-14.** `signals._note_rank` records each candidate's position within each
-source's own list as it is gathered (native and graph alike); `_merge_and_score` keeps the best
-position any seed gave it; `_finalize` sorts on `(-score, rank, title)`, and variant collapse
-prefers the better-ranked variant at equal score. Score is untouched, so corroboration cannot
-move by construction.
-
-**The fix was half-invisible to the harness, and would have shipped that way.** The first
-change made `_finalize` rank-ordered, and `quality_check.py` — which calls `_finalize` directly —
-would have reported the win. But `server._apply_result_filters` re-sorts `recommend_from_song`'s
-results on `(-base_score, title)` a second time, after `_finalize`, so the real tool would have
-stayed alphabetical. §7.11's lesson from the other side: there the harness carried a stale copy
-of shipping logic; here the shipping tool carries a step the harness doesn't mirror. Now a
-stable sort on score alone, pinned by a test that fails without it.
-
-**Measured, YouTube.** Full harness, `--similarity --repeat`, before (a worktree of `main`) and
-after:
-
-| | before | after |
-| --- | --- | --- |
-| corroborated | 0.57 | 0.59 |
-| concentration (HHI) | 0.222 | 0.226 |
-| cross-seed overlap | 0.027 | 0.036 |
-| distinct / slots | 88/100 | 85/100 |
-| noise floor | 0.77 | 0.85 |
-
-None of that clears YouTube's noise floor, which is the point of a second measurement: a
-same-pool A/B gathers each seed's candidates **once** and ranks that pool both ways, so every
-difference is the sort key. Two independent gathers, nine seeds:
-
-| same pool | title tie-break | rank tie-break |
-| --- | --- | --- |
-| HHI (uncapped) | 0.213 / 0.209 | **0.236 / 0.229** |
-| seed-artist share | 0.200 / 0.200 | **0.300 / 0.300** |
-| cross-seed overlap | 0.044 / 0.042 | 0.044 / 0.039 |
-| corroborated | identical | identical |
-
-The picks are plainly better. *Kryptonite*'s tied tail went from "3AM, ANTIDOTE (FULL MIX)" plus
-three re-uploads of the seed to "Here Without You, Holiday, In the End, Everlong"; *Blinding
-Lights* from "1989, A Sky Full of Stars, Anything Can Happen" to "Get Lucky, One More Time, Sign
-of the Times"; *Brown Munde* from literally "21, Aaye Haaye, Afsos… Bars".
-
-The cost is real and was predicted before measuring: rank ordering pulls in more of the seed
-artist (share 0.20 → 0.30 uncapped). The obvious suspect — the seed artist's own popularity-ordered
-top-songs lists taking rank 0 — was tested as a third arm that ignores `artist`/`graph_artist`
-positions, and **refuted**: HHI 0.240, share 0.267. The similarity sources themselves rank the
-seed artist's other songs highly, which is arguably correct similarity rather than a defect of
-the key. Kept the simpler version. What a user sees is bounded: `recommend_from_song` caps at 2
-per artist (live, *Excuses*/*Bad Guy*/*Brown Munde*: max 2, no alphabetical tail), and the
-pinned-playlist case was fully corroborated in both runs, so the tie-break never reached its top
-ten. `recommend_from_playlist` has no per-artist cap; if a thin playlist shows concentration,
-that cap is the fix, not reverting this.
-
-Out of scope and noted: the harness's `_run_similarity` does not drop re-uploads of the seed the
-way `_apply_result_filters` does, so its per-seed lists can include the seed song under other
-ids (*Kryptonite* ×3 in the title arm). The tool is unaffected.
 
 ### 7.6 Respect native dislikes
 
@@ -1275,6 +1209,107 @@ this generalizes: all empty either way. So this fixes Channa Mereya specifically
 class of problem — most of §7.13's residual is still real. Tests:
 `test_neighbours_fall_back_to_composer_credit_when_performer_credit_is_empty` and
 `test_neighbours_do_not_retry_lastfm_when_credits_are_the_same` in `tests/test_lastfm.py`.
+
+### 7.15 Break score ties on evidence, not the alphabet — *done; better picks, somewhat more seed-artist concentration*
+
+`signals._finalize` sorted on `(-score, title)`. Measured 2026-09-14 on *Excuses*: 27 of the top
+30 candidates tie at score 1, so the title tie-break decides almost the whole list. Proposed:
+a secondary key from each candidate's best rank within the source that surfaced it, then title
+only as a final deterministic fallback. That rank is not stored today — `_merge_and_score` keeps
+only the source set and a count — but the merged dict is built in each source's own order, and
+Python's sort is stable, so recording first-seen position at merge time is cheap; it is the title
+key that currently throws it away. Measure with
+`quality_check.py --similarity` before and after; nothing about it should change the top of a
+well-corroborated result.
+
+**Built 2026-09-14.** `signals._note_rank` records each candidate's position within each
+source's own list as it is gathered (native and graph alike); `_merge_and_score` keeps the best
+position any seed gave it; `_finalize` sorts on `(-score, rank, title)`, and variant collapse
+prefers the better-ranked variant at equal score. Score is untouched, so corroboration cannot
+move by construction.
+
+**The fix was half-invisible to the harness, and would have shipped that way.** The first
+change made `_finalize` rank-ordered, and `quality_check.py` — which calls `_finalize` directly —
+would have reported the win. But `server._apply_result_filters` re-sorts `recommend_from_song`'s
+results on `(-base_score, title)` a second time, after `_finalize`, so the real tool would have
+stayed alphabetical. §7.11's lesson from the other side: there the harness carried a stale copy
+of shipping logic; here the shipping tool carries a step the harness doesn't mirror. Now a
+stable sort on score alone, pinned by a test that fails without it.
+
+**Measured, YouTube.** Full harness, `--similarity --repeat`, before (a worktree of `main`) and
+after:
+
+| | before | after |
+| --- | --- | --- |
+| corroborated | 0.57 | 0.59 |
+| concentration (HHI) | 0.222 | 0.226 |
+| cross-seed overlap | 0.027 | 0.036 |
+| distinct / slots | 88/100 | 85/100 |
+| noise floor | 0.77 | 0.85 |
+
+None of that clears YouTube's noise floor, which is the point of a second measurement: a
+same-pool A/B gathers each seed's candidates **once** and ranks that pool both ways, so every
+difference is the sort key. Two independent gathers, nine seeds:
+
+| same pool | title tie-break | rank tie-break |
+| --- | --- | --- |
+| HHI (uncapped) | 0.213 / 0.209 | **0.236 / 0.229** |
+| seed-artist share | 0.200 / 0.200 | **0.300 / 0.300** |
+| cross-seed overlap | 0.044 / 0.042 | 0.044 / 0.039 |
+| corroborated | identical | identical |
+
+The picks are plainly better. *Kryptonite*'s tied tail went from "3AM, ANTIDOTE (FULL MIX)" plus
+three re-uploads of the seed to "Here Without You, Holiday, In the End, Everlong"; *Blinding
+Lights* from "1989, A Sky Full of Stars, Anything Can Happen" to "Get Lucky, One More Time, Sign
+of the Times"; *Brown Munde* from literally "21, Aaye Haaye, Afsos… Bars".
+
+The cost is real and was predicted before measuring: rank ordering pulls in more of the seed
+artist (share 0.20 → 0.30 uncapped). The obvious suspect — the seed artist's own popularity-ordered
+top-songs lists taking rank 0 — was tested as a third arm that ignores `artist`/`graph_artist`
+positions, and **refuted**: HHI 0.240, share 0.267. The similarity sources themselves rank the
+seed artist's other songs highly, which is arguably correct similarity rather than a defect of
+the key. Kept the simpler version. What a user sees is bounded: `recommend_from_song` caps at 2
+per artist (live, *Excuses*/*Bad Guy*/*Brown Munde*: max 2, no alphabetical tail), and the
+pinned-playlist case was fully corroborated in both runs, so the tie-break never reached its top
+ten. `recommend_from_playlist` has no per-artist cap; if a thin playlist shows concentration,
+that cap is the fix, not reverting this.
+
+Out of scope and noted: the harness's `_run_similarity` does not drop re-uploads of the seed the
+way `_apply_result_filters` does, so its per-seed lists can include the seed song under other
+ids (*Kryptonite* ×3 in the title arm). The tool is unaffected.
+
+### 7.16 Corroboration on the similarity path — *open; investigate before proposing*
+
+The problem §7.15 made visible rather than solved. On *Excuses* (YouTube, 2026-09-14) 27 of the
+top 30 candidates rest on a single source, so ordering within that tail is the only lever left
+and no tie-break can make a single voice into agreement. On the harness, 57–59% of YouTube's top
+ten are corroborated (§7.15) and 34% of Spotify's (§7.13). The same-artist defect §7.12 opened is
+the same shortage seen from another angle.
+
+**Already ruled out, so not to be re-proposed:**
+
+- *Another artist-centric source.* §7.10: independence and corroboration are opposites, and no
+  artist-level source can separate two songs by one artist.
+- *ListenBrainz configuration.* §7.12 probed all seven algorithms; the gap is its listener base.
+- *Recent Bollywood film songs via last.fm/ListenBrainz.* §7.13/§7.14: empty under both performer
+  and composer credits for most titles probed; a data gap, not a query bug.
+
+**The first lead is in the code, not in a new source.** Native candidates are keyed by provider id,
+graph candidates by `graph:<deezer id>` (`signals._add_graph_candidates`), so `_merge_and_score`
+never merges a song that YouTube radio and, say, last.fm both named — they stay two candidates at
+score 1 each. The only place they meet is `_collapse_variants`, which keeps the higher-scoring copy
+and **drops the other's sources rather than unioning them**. Agreement between the native and graph
+families is therefore structurally uncountable on YouTube. Read from the code, **not yet measured**:
+how often it happens decides whether this is the fix or a footnote.
+
+**Next step, measurement only.** Over `quality_check.SIMILARITY_SEEDS`, count for each seed how
+many collapsed clusters contain both a native and a graph candidate, and what the corroborated
+share would be if collapse unioned `sources` and summed score. Report per catalogue (western /
+South Asian), against the same-pool method from §7.15 so the number is free of YouTube's noise
+floor. Spotify cannot show this effect — it has no native signals to fragment against — which is
+also a prediction worth checking. Only if that count is material does a change get proposed, and
+then the obvious one (union on collapse) still has to be measured for concentration, since more
+agreement can also mean more of the seed artist.
 
 ---
 
