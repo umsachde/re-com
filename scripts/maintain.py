@@ -60,7 +60,7 @@ DEFAULT_TEMPO_LIMIT = 400
 DEFAULT_GRAPH_LIMIT = 40
 
 
-def _stage(name: str, fn) -> dict:
+def _stage(fn) -> dict:
     """Run one stage, never letting it take the rest of the script down with it.
 
     Mirrors the contract `graph.py`'s second and third sources are held to:
@@ -98,89 +98,93 @@ def main() -> int:
     graph_limit = None if args.full else DEFAULT_GRAPH_LIMIT
 
     stages: dict[str, dict] = {}
-    client = server._client()
 
     print("1/4 library sync + atlas materialize + artist propagation...", flush=True)
-    stages["library_sync"] = _stage("library_sync", lambda: label.sync_library(conn, client))
-    stages["atlas_materialize"] = _stage(
-        "atlas_materialize", lambda: {"placed": atlas.materialize_moods(conn)}
-    )
-    stages["artist_propagate"] = _stage(
-        "artist_propagate", lambda: {"propagated": label.propagate_by_artist(conn)}
-    )
+    # The client is built inside the stage: an unconfigured or dead provider
+    # subprocess costs the sync, not the tempo and graph stages that don't need it.
+    stages["library_sync"] = _stage(lambda: label.sync_library(conn, server._client()))
+    stages["atlas_materialize"] = _stage(lambda: {"placed": atlas.materialize_moods(conn)})
+    stages["artist_propagate"] = _stage(lambda: {"propagated": label.propagate_by_artist(conn)})
     for name in ("library_sync", "atlas_materialize", "artist_propagate"):
         print(f"    {name}: {stages[name]}", flush=True)
 
     auth_path = _youtube_auth_available()
     if server.PROVIDER == "youtube" and auth_path:
         print("2/4 YouTube editorial mood atlas + genre pages...", flush=True)
-        from ytmusicapi import YTMusic  # local: keeps this optional for non-YouTube installs
+        yt_holder: list = []
 
-        yt = YTMusic(str(auth_path))
-        stages["youtube_atlas"] = _stage(
-            "youtube_atlas", lambda: atlas.crawl(yt, conn, limit=atlas_limit)
-        )
-        stages["youtube_atlas_materialize"] = _stage(
-            "youtube_atlas_materialize", lambda: {"placed": atlas.materialize_moods(conn)}
-        )
+        def _yt():
+            if not yt_holder:
+                from ytmusicapi import YTMusic  # local: keeps this optional for non-YouTube installs
+
+                yt_holder.append(YTMusic(str(auth_path)))
+            return yt_holder[0]
+
+        stages["youtube_atlas"] = _stage(lambda: atlas.crawl(_yt(), conn, limit=atlas_limit))
+        stages["youtube_atlas_materialize"] = _stage(lambda: {"placed": atlas.materialize_moods(conn)})
         stages["youtube_genres"] = _stage(
-            "youtube_genres",
-            lambda: taxonomy.crawl_genres(yt, conn, playlists_per_genre=DEFAULT_GENRE_PLAYLISTS),
+            lambda: taxonomy.crawl_genres(_yt(), conn, playlists_per_genre=DEFAULT_GENRE_PLAYLISTS)
         )
         for name in ("youtube_atlas", "youtube_atlas_materialize", "youtube_genres"):
             print(f"    {name}: {stages[name]}", flush=True)
     else:
-        reason = "provider is not youtube" if server.PROVIDER != "youtube" else f"no auth at {auth_path or 'headers_auth.json'}"
+        reason = "provider is not youtube" if server.PROVIDER != "youtube" else "no headers_auth.json (RECOM_AUTH_PATH)"
         print(f"2/4 skipped ({reason})", flush=True)
         stages["youtube_atlas"] = {"status": "skipped", "reason": reason}
 
     print("3/4 tempo backfill...", flush=True)
 
     def _tempo() -> dict:
+        # Filter to never-attempted tracks *before* the limit. Truncating first
+        # re-checked the same 400 cached rows every bounded run and never
+        # reached the rest of the library -- seen live as cached=400, resolved=0.
         rows = [
             dict(r)
             for r in conn.execute(
                 "SELECT t.video_id, t.title, t.artists FROM track t "
-                "JOIN library_track l USING (video_id) WHERE t.title IS NOT NULL "
+                "JOIN library_track l USING (video_id) "
+                "LEFT JOIN track_tempo tt ON tt.video_id = t.video_id "
+                "WHERE t.title IS NOT NULL AND tt.video_id IS NULL "
                 "GROUP BY t.video_id"
             )
         ]
         if tempo_limit is not None:
             rows = rows[:tempo_limit]
-        return tempo.backfill(conn, rows)
+        return {"pending_before": len(rows), **tempo.backfill(conn, rows)}
 
-    stages["tempo"] = _stage("tempo", _tempo)
+    stages["tempo"] = _stage(_tempo)
     print(f"    tempo: {stages['tempo']}", flush=True)
 
+    graph_coverage = None
     if server.GRAPH_ENABLED:
         print("4/4 shared graph atlas: crawl, materialize, propagate...", flush=True)
-        graph_conn = graph_store.connect()
-        stages["graph_crawl"] = _stage(
-            "graph_crawl", lambda: graph_atlas.crawl(graph_conn, limit=graph_limit)
-        )
-        stages["graph_materialize"] = _stage(
-            "graph_materialize", lambda: {"placed": graph_atlas.materialize_moods(graph_conn)}
-        )
+        graph_conns: list = []
+
+        def _graph_conn():
+            if not graph_conns:
+                graph_conns.append(graph_store.connect())
+            return graph_conns[0]
+
+        stages["graph_crawl"] = _stage(lambda: graph_atlas.crawl(_graph_conn(), limit=graph_limit))
+        stages["graph_materialize"] = _stage(lambda: {"placed": graph_atlas.materialize_moods(_graph_conn())})
 
         def _graph_propagate() -> dict:
-            rows = [
-                {
-                    "video_id": vid,
-                    "title": (store.get_track(conn, vid) or {}).get("title"),
-                    "artists": (store.get_track(conn, vid) or {}).get("artists"),
-                }
-                for vid in sorted(store.library_video_ids(conn))
-            ]
-            return graph_atlas.propagate_to_provider(conn, graph_conn, rows)
+            rows = []
+            for vid in sorted(store.library_video_ids(conn)):
+                track = store.get_track(conn, vid) or {}
+                rows.append({"video_id": vid, "title": track.get("title"), "artists": track.get("artists")})
+            return graph_atlas.propagate_to_provider(conn, _graph_conn(), rows)
 
-        stages["graph_propagate"] = _stage("graph_propagate", _graph_propagate)
+        stages["graph_propagate"] = _stage(_graph_propagate)
         for name in ("graph_crawl", "graph_materialize", "graph_propagate"):
             print(f"    {name}: {stages[name]}", flush=True)
-        graph_coverage = graph_atlas.coverage(graph_conn)
+        try:
+            graph_coverage = graph_atlas.coverage(_graph_conn())
+        except Exception as e:  # noqa: BLE001 - the run's record matters more than the graph numbers
+            print(f"    graph coverage unavailable: {type(e).__name__}: {e}", flush=True)
     else:
         print("4/4 skipped (graph disabled: RECOM_GRAPH=0)", flush=True)
         stages["graph_crawl"] = {"status": "skipped", "reason": "RECOM_GRAPH=0"}
-        graph_coverage = None
 
     # Captured before recording, not after: `record_maintenance_run` below
     # overwrites the very snapshot this run needs to diff against, so reading

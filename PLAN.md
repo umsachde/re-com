@@ -784,6 +784,14 @@ nothing new. The exact failure mode §6.5 named: this is a case a mocked/unit-te
 `_report_status` would not have surfaced, because the bug is in the sequencing between two real
 writes to the same store, not in either write's own correctness.
 
+Review then caught a second, quieter one that the second live run had already shown without
+anyone reading it: `tempo: cached=400, resolved=0`. The bounded run truncated the library to
+400 rows *before* skipping already-attempted ones, so every scheduled run re-checked the same
+400 and 215 tracks were unreachable forever. Filtered to never-attempted rows first; the third
+live run attempted all 217 pending (96 with BPM), `tempo_coverage +0.0098`. The same review
+moved the provider client, `YTMusic` and graph connection inside their stages, so an
+unconfigured backend costs its own stage rather than the whole run and its record.
+
 ### 7.5 Close the read-only handoff gap
 
 §4.9's decision is right; the ergonomics around it are a footgun. Turning a recommendation
