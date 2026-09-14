@@ -26,11 +26,15 @@ back a song you just saved as if it were still "new".
    re-com's response returned. re-com has no playlist-write tool of its own;
    don't look for one.
 
-3. **Call `refresh_library()` on the same re-com instance immediately after.**
-   This is not optional cleanup — without it, the next recommendation call in
-   this session (or within the TTL) can recommend something you just added.
-   Call it once per batch of adds, right after the add call succeeds, not at
-   the end of an unrelated later turn.
+3. **Call `refresh_library(video_ids=[...])` on the same re-com instance
+   immediately after**, passing exactly the ids you just added. It adds them
+   to the exclusion cache instantly, with no ~20s rebuild. This is not
+   optional cleanup: re-com keeps a song it handed out excluded for
+   `RECOM_SERVED_TTL` (default 2 hours), but once that passes, a saved song can
+   come back until the cache is refreshed. Call it once per batch of adds,
+   right after the add call succeeds, not at the end of an unrelated later
+   turn. Bare `refresh_library()` (a full rebuild) is only for library changes
+   you can't list by id.
 
 ## Which re-com instance to refresh
 
@@ -45,3 +49,7 @@ does nothing for the cache that matters.
 If a recommendation right after a save still includes a song you just added,
 the most likely cause is a missed or wrong-instance `refresh_library()` call,
 not a bug in the recommendation logic itself.
+
+If the user asks to see the same recommendations again, re-show the list you
+already have rather than calling the tool again: a repeat call deliberately
+returns different songs while the served window is open.

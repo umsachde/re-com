@@ -159,6 +159,17 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Every song any tool handed out, kept only long enough to stop it coming
+-- straight back before the listener has saved it anywhere (PLAN.md 7.5).
+-- Separate from `recommendation`, which feeds implicit feedback and should
+-- keep meaning "served by the mood engine".
+CREATE TABLE IF NOT EXISTS served (
+    video_id  TEXT NOT NULL,
+    served_at REAL NOT NULL,
+    tool      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_served_at ON served (served_at);
 """
 
 
@@ -576,6 +587,33 @@ def log_recommendations(
             rows,
         )
     return len(rows)
+
+
+def record_served(conn: sqlite3.Connection, video_ids: Iterable[str], tool: str, keep_seconds: float) -> int:
+    """Log songs just handed out, pruning anything older than `keep_seconds`.
+
+    Pruned here rather than by a cron because nothing else reads this table:
+    past its window a row can never exclude anything again.
+    """
+    stamp = time.time()
+    rows = [(v, stamp, tool) for v in dict.fromkeys(video_ids) if v]
+    with conn:
+        conn.execute("DELETE FROM served WHERE served_at < ?", (stamp - keep_seconds,))
+        if rows:
+            conn.executemany("INSERT INTO served (video_id, served_at, tool) VALUES (?, ?, ?)", rows)
+    return len(rows)
+
+
+def recently_served_video_ids(conn: sqlite3.Connection, within_seconds: float) -> set[str]:
+    """Songs any tool served in the last `within_seconds`. Empty when disabled (<= 0)."""
+    if within_seconds <= 0:
+        return set()
+    return {
+        r["video_id"]
+        for r in conn.execute(
+            "SELECT DISTINCT video_id FROM served WHERE served_at >= ?", (time.time() - within_seconds,)
+        )
+    }
 
 
 # Reactions the listener states outright, and the ones only inferred from
