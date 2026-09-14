@@ -218,6 +218,9 @@ def run_one_backend(budget, limit, include_writes):
     """Exercise every tool in this process, against this process's provider."""
     import server
 
+    # A smoke run must not hide its picks from the listener's next real session.
+    server.SERVED_TTL = 0
+
     checks = []
     out = {"provider": server.PROVIDER, "graph": server.GRAPH_ENABLED, "checks": checks}
 

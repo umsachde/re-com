@@ -792,7 +792,7 @@ live run attempted all 217 pending (96 with BPM), `tempo_coverage +0.0098`. The 
 moved the provider client, `YTMusic` and graph connection inside their stages, so an
 unconfigured backend costs its own stage rather than the whole run and its record.
 
-### 7.5 Close the read-only handoff gap
+### 7.5 Close the read-only handoff gap — *done*
 
 §4.9's decision is right; the ergonomics around it are a footgun. Turning a recommendation
 into a playlist is three steps and skipping the third leaves the exclusion set stale for up
@@ -805,6 +805,112 @@ Proposed, without letting re-com write anything:
 - A `served` staging set, so a song handed out 30 seconds ago cannot come back in the next
   call before it has been saved anywhere. "No repeats within a session" is the failure users
   actually notice.
+
+**Built 2026-09-14.** Both, as proposed. `refresh_library(video_ids=[...])` unions into the
+cache and keeps its original `fetched_at`, so adding ids never makes a stale full build look
+fresh; with no usable cache it falls back to a full build and still unions the ids, in case
+the service hasn't surfaced the add yet. The served set is a new `served` table rather than
+the existing `recommendation` one, which feeds implicit feedback and should keep meaning
+"served by the mood engine" — logging similarity picks there would have quietly changed mood
+ranking. All five recommendation tools read and write it; `RECOM_SERVED_TTL` (default 2 hours,
+`0` disables) bounds it, and rows are pruned on write since nothing reads them past the window.
+The smoke harness sets it to 0 so a pre-release run can't hide songs from the listener's next
+real session; `quality_check.py` mirrors the pipeline rather than calling the tools, so its
+repeated-run noise floor is untouched.
+
+The 2-hour default is a judgment call, deliberately not tied to `RECOM_CACHE_TTL`: this install
+runs a 7-day cache, and a week without seeing a song again is not "a session".
+
+**Live, YouTube, against a copy of the real cache and a throwaway store.** Two consecutive
+`songs_by_artist("AP Dhillon", 5)` calls overlapped 0/5; so did two `recommend_from_song`
+calls on *Excuses*. `refresh_library(video_ids=[one])` took 0.00s against ~20s for a rebuild,
+added exactly one id, and preserved `fetched_at`; with the served set disabled, that id stayed
+excluded by the cache alone.
+
+**What the live run exposed, not caused.** The second *Excuses* batch came back in alphabetical
+order, and that is literal: of the top 30 candidates, 3 score 2 and 27 tie at 1, and
+`signals._finalize` breaks ties on title. So past the first three, `recommend_from_song` on
+this seed is ordering by the alphabet, not by similarity — §7.10's single-signal finding seen
+from the user's side. The served set does not create this, but it makes it visible: every
+repeat call walks further down an alphabetical tail. The tie-break wants a real secondary key; tracked
+as §7.15.
+
+**Review found the guarantee had a hole older than this work.** When a language filter leaves
+`recommend_from_song` short, `_apply_result_filters` re-seeds from the survivors through
+`recommend.bridge_expand` — and passed it `exclude=set()`. The bridge's candidates are gathered
+after the tool's own exclusion has already run, so nothing else ever checked them: songs already
+in the library could come back through it, and after this change so could just-served ones. The
+library half predates §7.5 and was on `main`; it only surfaced because "every tool honours the
+served set" made someone trace every path that produces a song. The tool's full exclusion set,
+plus the seed, now reaches the bridge, pinned by a test that fails without it.
+
+### 7.15 Break score ties on evidence, not the alphabet — *done; better picks, somewhat more seed-artist concentration*
+
+`signals._finalize` sorted on `(-score, title)`. Measured 2026-09-14 on *Excuses*: 27 of the top
+30 candidates tie at score 1, so the title tie-break decides almost the whole list. Proposed:
+a secondary key from each candidate's best rank within the source that surfaced it, then title
+only as a final deterministic fallback. That rank is not stored today — `_merge_and_score` keeps
+only the source set and a count — but the merged dict is built in each source's own order, and
+Python's sort is stable, so recording first-seen position at merge time is cheap; it is the title
+key that currently throws it away. Measure with
+`quality_check.py --similarity` before and after; nothing about it should change the top of a
+well-corroborated result.
+
+**Built 2026-09-14.** `signals._note_rank` records each candidate's position within each
+source's own list as it is gathered (native and graph alike); `_merge_and_score` keeps the best
+position any seed gave it; `_finalize` sorts on `(-score, rank, title)`, and variant collapse
+prefers the better-ranked variant at equal score. Score is untouched, so corroboration cannot
+move by construction.
+
+**The fix was half-invisible to the harness, and would have shipped that way.** The first
+change made `_finalize` rank-ordered, and `quality_check.py` — which calls `_finalize` directly —
+would have reported the win. But `server._apply_result_filters` re-sorts `recommend_from_song`'s
+results on `(-base_score, title)` a second time, after `_finalize`, so the real tool would have
+stayed alphabetical. §7.11's lesson from the other side: there the harness carried a stale copy
+of shipping logic; here the shipping tool carries a step the harness doesn't mirror. Now a
+stable sort on score alone, pinned by a test that fails without it.
+
+**Measured, YouTube.** Full harness, `--similarity --repeat`, before (a worktree of `main`) and
+after:
+
+| | before | after |
+| --- | --- | --- |
+| corroborated | 0.57 | 0.59 |
+| concentration (HHI) | 0.222 | 0.226 |
+| cross-seed overlap | 0.027 | 0.036 |
+| distinct / slots | 88/100 | 85/100 |
+| noise floor | 0.77 | 0.85 |
+
+None of that clears YouTube's noise floor, which is the point of a second measurement: a
+same-pool A/B gathers each seed's candidates **once** and ranks that pool both ways, so every
+difference is the sort key. Two independent gathers, nine seeds:
+
+| same pool | title tie-break | rank tie-break |
+| --- | --- | --- |
+| HHI (uncapped) | 0.213 / 0.209 | **0.236 / 0.229** |
+| seed-artist share | 0.200 / 0.200 | **0.300 / 0.300** |
+| cross-seed overlap | 0.044 / 0.042 | 0.044 / 0.039 |
+| corroborated | identical | identical |
+
+The picks are plainly better. *Kryptonite*'s tied tail went from "3AM, ANTIDOTE (FULL MIX)" plus
+three re-uploads of the seed to "Here Without You, Holiday, In the End, Everlong"; *Blinding
+Lights* from "1989, A Sky Full of Stars, Anything Can Happen" to "Get Lucky, One More Time, Sign
+of the Times"; *Brown Munde* from literally "21, Aaye Haaye, Afsos… Bars".
+
+The cost is real and was predicted before measuring: rank ordering pulls in more of the seed
+artist (share 0.20 → 0.30 uncapped). The obvious suspect — the seed artist's own popularity-ordered
+top-songs lists taking rank 0 — was tested as a third arm that ignores `artist`/`graph_artist`
+positions, and **refuted**: HHI 0.240, share 0.267. The similarity sources themselves rank the
+seed artist's other songs highly, which is arguably correct similarity rather than a defect of
+the key. Kept the simpler version. What a user sees is bounded: `recommend_from_song` caps at 2
+per artist (live, *Excuses*/*Bad Guy*/*Brown Munde*: max 2, no alphabetical tail), and the
+pinned-playlist case was fully corroborated in both runs, so the tie-break never reached its top
+ten. `recommend_from_playlist` has no per-artist cap; if a thin playlist shows concentration,
+that cap is the fix, not reverting this.
+
+Out of scope and noted: the harness's `_run_similarity` does not drop re-uploads of the seed the
+way `_apply_result_filters` does, so its per-seed lists can include the seed song under other
+ids (*Kryptonite* ×3 in the title arm). The tool is unaffected.
 
 ### 7.6 Respect native dislikes
 

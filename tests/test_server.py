@@ -12,6 +12,7 @@ import pytest
 from ytmusic_client import YTMusicMCPError
 
 import server
+import store
 from server import (
     _artist_song_catalog,
     _build_library_video_ids,
@@ -105,6 +106,15 @@ def test_merge_and_score_keeps_candidates_separate():
     assert set(merged.keys()) == {"v1", "v2"}
 
 
+def test_merge_and_score_keeps_the_best_rank_any_seed_gave():
+    per_seed = [
+        {"v1": {"videoId": "v1", "title": "T1", "artists": [], "album": None, "sources": {"radio"}, "rank": 7}},
+        {"v1": {"videoId": "v1", "title": "T1", "artists": [], "album": None, "sources": {"artist"}, "rank": 2}},
+        {"v1": {"videoId": "v1", "title": "T1", "artists": [], "album": None, "sources": {"related"}}},
+    ]
+    assert _merge_and_score(per_seed)["v1"]["rank"] == 2
+
+
 # --- _finalize -------------------------------------------------------------
 
 
@@ -130,6 +140,71 @@ def test_finalize_sorts_by_score_desc_then_title_asc():
     }
     out, _ = _finalize(merged, exclude=set(), limit=10)
     assert [c["videoId"] for c in out] == ["b", "c", "a"]
+
+
+def test_finalize_breaks_score_ties_on_source_rank_before_title():
+    # PLAN.md 7.15: a tied tail used to come back in alphabetical order.
+    merged = {
+        "a": {**_candidate("a", 1, title="Aaye Haaye"), "rank": 9},
+        "z": {**_candidate("z", 1, title="Zara"), "rank": 0},
+        "m": {**_candidate("m", 1, title="Middle"), "rank": 3},
+        "u": _candidate("u", 1, title="Unranked"),
+        "top": {**_candidate("top", 2, title="Zzz"), "rank": 40},
+    }
+    out, _ = _finalize(merged, exclude=set(), limit=10)
+    # Score still decides first; rank only orders within a score.
+    assert [c["videoId"] for c in out] == ["top", "z", "m", "a", "u"]
+
+
+def test_result_filters_keep_finalize_order_among_ties():
+    # The similarity tools re-sort after _finalize; a title key there quietly
+    # re-alphabetised every tie _finalize had ordered by source rank.
+    ranked = [
+        {"videoId": vid, "title": title, "artists": [artist], "album": None, "score": score, "sources": ["radio"]}
+        for vid, title, artist, score in [
+            ("t", "Top", "A", 2), ("z", "Zara", "B", 1), ("m", "Middle", "C", 1), ("a", "Aaye Haaye", "D", 1),
+        ]
+    ]
+    result = server._apply_result_filters(
+        ranked, seed_video_id=None, seed_title=None, seed_artist=None, limit=10,
+    )
+    assert [s["videoId"] for s in result["songs"]] == ["t", "z", "m", "a"]
+
+
+def test_language_bridge_honours_the_callers_exclusions(monkeypatch):
+    # The bridge gathers brand-new candidates after the tool's own exclusion
+    # already ran; it used to be handed an empty set, so library and just-served
+    # songs came straight back through it.
+    import filters
+    import recommend
+    import signals
+
+    def cand(vid):
+        return {"videoId": vid, "title": vid, "artists": ["X"], "album": None, "sources": {"radio"}}
+
+    monkeypatch.setattr(server, "_client", lambda: object())
+    monkeypatch.setattr(signals, "gather_seeds", lambda yt, ids, **kw: [
+        {v: cand(v) for v in ("in_library", "just_served", "seed", "fresh")}
+    ])
+    monkeypatch.setattr(filters, "apply_language", lambda conn, c, **kw: (list(c), {"applied": True, "kept": len(c)}))
+    monkeypatch.setattr(recommend, "_language_note", lambda report, limit: "note")
+
+    survivor = {"videoId": "survivor", "title": "Survivor", "artists": ["Y"], "album": None, "score": 1, "sources": ["radio"]}
+    result = server._apply_result_filters(
+        [survivor], seed_video_id="seed", seed_title="Seed", seed_artist="Z", limit=5,
+        language=["english"], exclude={"in_library", "just_served"},
+    )
+    assert {s["videoId"] for s in result["songs"]} == {"survivor", "fresh"}
+
+
+def test_finalize_collapse_prefers_the_better_ranked_variant_at_equal_score():
+    merged = {
+        "v1": {**_candidate("v1", 1, title="Dead and Gone"), "rank": 8, "artists": ["T.I."]},
+        "v2": {**_candidate("v2", 1, title="Dead and Gone (feat. Justin Timberlake)"), "rank": 1,
+               "artists": ["T.I.", "Justin Timberlake"]},
+    }
+    out, _ = _finalize(merged, exclude=set(), limit=10)
+    assert [c["videoId"] for c in out] == ["v2"]
 
 
 def test_finalize_respects_limit():
@@ -474,6 +549,10 @@ def test_gather_seed_candidates_full_pipeline():
     assert found["relsong1"]["sources"] == {"artist"}
     assert found["relsong2"]["sources"] == {"artist"}
     assert "relartist3" not in yt.get_artist_calls  # only first 2 related artists expanded
+    # Position within each source's own list; the skipped seed takes no slot.
+    assert {v: found[v]["rank"] for v in found} == {
+        "radio1": 0, "related1": 0, "artistsong1": 0, "relsong1": 1, "relsong2": 2,
+    }
 
 
 def test_gather_seed_candidates_signal_failure_is_skipped_not_fatal():
@@ -1010,5 +1089,79 @@ def test_refresh_library_rebuilds_and_reports(monkeypatch, isolated_cache):
     result = refresh_library()
     assert result["tracks_excluded"] == 2
     assert result["ttl_seconds"] == server.CACHE_TTL
+    assert result["rebuilt"] is True
     assert yt.get_library_playlists_calls == 1
     assert sorted(json.loads(isolated_cache.read_text())["video_ids"]) == ["liked1", "pl1song1"]
+
+
+def test_refresh_library_with_ids_unions_into_the_cache_without_rebuilding(monkeypatch, isolated_cache):
+    built_at = time.time() - 600
+    isolated_cache.write_text(json.dumps({"fetched_at": built_at, "video_ids": ["liked1"]}))
+    monkeypatch.setattr(server, "_client", lambda: pytest.fail("a union must not touch the service"))
+
+    result = refresh_library(video_ids=["just_saved", "liked1", ""])
+
+    assert result == {**result, "rebuilt": False, "added": 1, "tracks_excluded": 2}
+    written = json.loads(isolated_cache.read_text())
+    assert sorted(written["video_ids"]) == ["just_saved", "liked1"]
+    # Adding ids must not make a ten-minute-old build look fresh.
+    assert written["fetched_at"] == built_at
+
+
+def test_refresh_library_with_ids_rebuilds_when_there_is_no_cache(monkeypatch, isolated_cache):
+    yt = _cache_fake()
+    monkeypatch.setattr(server, "_client", lambda: yt)
+
+    result = refresh_library(video_ids=["not_visible_yet"])
+
+    assert result["rebuilt"] is True
+    assert yt.get_library_playlists_calls == 1
+    # The service may not show the add yet; the id is kept either way.
+    assert "not_visible_yet" in json.loads(isolated_cache.read_text())["video_ids"]
+
+
+# --- served exclusion (PLAN.md 7.5) ------------------------------------------
+
+
+def _artist_fake(n=3):
+    return _FakeYT(
+        search_results={"Test Artist": [{"artist": "Test Artist", "browseId": "UC1"}]},
+        artists={"UC1": {"songs": {"browseId": "VLPL1", "results": []}}},
+        playlists={
+            "VLPL1": {
+                "tracks": [
+                    {"videoId": f"s{i}", "title": f"Song {i}", "artists": [{"name": "Test Artist"}]}
+                    for i in range(n)
+                ]
+            },
+            "LM": {"tracks": []},
+        },
+    )
+
+
+def test_a_served_song_does_not_come_straight_back(monkeypatch):
+    monkeypatch.setattr(server, "_client", lambda: _artist_fake())
+
+    first = songs_by_artist("Test Artist", limit=2)["songs"]
+    second = songs_by_artist("Test Artist", limit=2)["songs"]
+
+    assert [s["videoId"] for s in first] == ["s0", "s1"]
+    assert [s["videoId"] for s in second] == ["s2"]
+
+
+def test_served_songs_return_once_the_window_passes(monkeypatch):
+    monkeypatch.setattr(server, "_client", lambda: _artist_fake())
+    songs_by_artist("Test Artist", limit=2)
+
+    real_time = time.time
+    monkeypatch.setattr(store.time, "time", lambda: real_time() + server.SERVED_TTL + 1)
+    assert [s["videoId"] for s in songs_by_artist("Test Artist", limit=2)["songs"]] == ["s0", "s1"]
+
+
+def test_served_exclusion_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(server, "_client", lambda: _artist_fake())
+    monkeypatch.setattr(server, "SERVED_TTL", 0)
+
+    songs_by_artist("Test Artist", limit=2)
+    assert [s["videoId"] for s in songs_by_artist("Test Artist", limit=2)["songs"]] == ["s0", "s1"]
+    assert store.recently_served_video_ids(server._store(), 3600) == set()

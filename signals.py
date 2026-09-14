@@ -156,6 +156,7 @@ def _gather_seed_candidates(
     """
     found: dict[str, dict[str, Any]] = {}
     caps = _provider.capabilities_of(yt)
+    positions: dict[str, int] = {}
 
     def add(item: dict[str, Any], source: str) -> None:
         vid = item.get("videoId")
@@ -164,6 +165,7 @@ def _gather_seed_candidates(
         if vid not in found:
             found[vid] = {**_norm_track(item), "sources": set()}
         found[vid]["sources"].add(source)
+        _note_rank(found[vid], positions, source)
 
     watch = None
     if _provider.CAP_RADIO in caps:
@@ -253,6 +255,7 @@ def _add_graph_candidates(
     if not seed:
         return
 
+    positions: dict[str, int] = {}
     for row in graph.neighbours(
         graph_conn,
         seed,
@@ -271,6 +274,26 @@ def _add_graph_candidates(
                 "sources": set(),
             }
         found[key]["sources"].add(row["source"])
+        _note_rank(found[key], positions, row["source"])
+
+
+# A candidate built without passing through `add` (tests, older callers) sorts
+# after every ranked one at the same score, never ahead of real evidence.
+_UNRANKED = 1 << 30
+
+
+def _note_rank(candidate: dict[str, Any], positions: dict[str, int], source: str) -> None:
+    """Keep the best position this candidate reached in any source's own list.
+
+    Ties at one score are otherwise broken on title, and on a thin seed most of
+    the pool ties: *Excuses* measured 27 of its top 30 at score 1, so the result
+    past the third song was alphabetical (PLAN.md 7.15). A source's own order is
+    real evidence -- radio, last.fm and ListenBrainz all rank by similarity --
+    and sorting on it puts every source's first pick ahead of any second pick.
+    """
+    rank = positions.get(source, 0)
+    positions[source] = rank + 1
+    candidate["rank"] = min(candidate.get("rank", _UNRANKED), rank)
 
 
 def gather_seeds(
@@ -349,6 +372,7 @@ def _merge_and_score(per_seed: list[dict[str, dict[str, Any]]]) -> dict[str, dic
                     "album": data["album"],
                     "sources": set(),
                     "score": 0,
+                    "rank": _UNRANKED,
                 }
                 # Carried, not scored: a graph candidate needs its Deezer
                 # reference to survive ranking so resolve_candidates can give
@@ -359,6 +383,7 @@ def _merge_and_score(per_seed: list[dict[str, dict[str, Any]]]) -> dict[str, dic
                 merged[vid] = entry
             entry["sources"] |= data["sources"]
             entry["score"] += len(data["sources"])
+            entry["rank"] = min(entry["rank"], data.get("rank", _UNRANKED))
     return merged
 
 
@@ -406,7 +431,7 @@ def _finalize(
             continue
         ranked.append(c)
 
-    ranked.sort(key=lambda c: (-c["score"], c.get("title") or ""))
+    ranked.sort(key=lambda c: (-c["score"], c.get("rank", _UNRANKED), c.get("title") or ""))
     out = []
     for c in ranked[:limit]:
         song = {
@@ -465,7 +490,7 @@ def _collapse_variants(pool: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[
             if len(cluster) == 1:
                 collapsed[cluster[0]] = pool[cluster[0]]
                 continue
-            best = max(cluster, key=lambda v: pool[v].get("score", 0))
+            best = max(cluster, key=lambda v: (pool[v].get("score", 0), -pool[v].get("rank", _UNRANKED)))
             collapsed[best] = pool[best]
             dropped += len(cluster) - 1
 

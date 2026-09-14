@@ -15,7 +15,7 @@ It's built to do better than a streaming service's built-in radio/autoplay by po
 | `recommend_from_song(video_id=None, song=None, artist=None, limit=20, language=None, match_seed_tempo=False, ...)` | Recommend new songs similar to a seed song. Pass `video_id` directly, or `song` (optionally with `artist`). Supports [language](#language-filtering) and [tempo](#tempo-bpm) filters. Returns `{"songs": [...], "notes": [...], "filters": {...}}`. |
 | `recommend_from_playlist(playlist_id, limit=20, seed_sample_size=5)` | Recommend new songs based on an entire playlist (samples seed tracks from it). |
 | `songs_by_artist(artist, limit=10)` | Return actual songs by a named artist — a direct catalog pull, not a similarity recommendation. |
-| `refresh_library()` | Force-rebuild the cached library exclusion set. See [Library cache](#library-cache). |
+| `refresh_library(video_ids=None)` | Add just-saved songs to the cached library exclusion set instantly, or rebuild it fully when called with no ids. See [Library cache](#library-cache). |
 | `recommend_for_mood(feeling=None, vector=None, context=None, arc="mirror", limit=20, genres=None, language=None, bpm=None, ...)` | **v2.** Recommend new songs matching how you actually feel, shaped into a sequence that moves. See [Mood](#mood-aware-recommendations-v2). |
 | `recommend_from_playlist_for_mood(playlist_id, feeling=None, vector=None, context=None, arc="mirror", limit=20, seed_cap=None, ...)` | **v2.** Mood *and* a playlist together: reads every track, seeds only from the ones that genuinely fit. See [Mood + one playlist](#mood--one-playlist). |
 | `read_my_mood()` | **v2.** Infer your current mood from recent listening, *with the evidence for it*. |
@@ -134,9 +134,11 @@ this order:
 2. A playlist-management tool — e.g. the separate `ytmusic` MCP server's
    `create_playlist` / `add_to_playlist` — to create it from the returned
    `videoId`s.
-3. **`refresh_library()`**, so the tracks you just added are excluded from the
-   next recommendation. Without this, the cached exclusion set is stale for up
-   to `RECOM_CACHE_TTL` and a later call can recommend a song you just saved.
+3. **`refresh_library(video_ids=[...])`** with the ids you just added, so they're
+   excluded from the next recommendation instantly, without a ~20s rebuild.
+   Without this, the cached exclusion set is stale for up to `RECOM_CACHE_TTL`
+   once the [served window](#library-cache) passes, and a later call can
+   recommend a song you just saved.
 
 ### Honesty about shortfalls
 
@@ -481,8 +483,14 @@ That set is now cached on disk. Measured on the same account:
 
 **Liking a song still takes effect immediately.** A cache hit re-fetches only the most recently liked
 songs (one page, ~1s) and unions them in, so the novelty guarantee holds for the mutation you actually
-make most. The case a cache hit can miss is a song added to some *other* playlist within the TTL — call
-`refresh_library()` after doing that if it matters, e.g. right after a playlist-management tool adds tracks.
+make most. The case a cache hit can miss is a song added to some *other* playlist within the TTL — right
+after a playlist-management tool adds tracks, call `refresh_library(video_ids=[...])` with those ids to add
+them to the cache instantly. `refresh_library()` with no ids rebuilds the whole set (~20s), which is only
+needed when the library changed in ways you can't list.
+
+**A song you were just handed doesn't come straight back.** Every recommendation tool records what it
+returned, and those songs stay excluded from every tool for `RECOM_SERVED_TTL`, whether or not you saved
+them. Asking for "more like this" gives you more, not the same list again.
 
 If the top-up fetch fails, the cached set is used as-is rather than failing the call — a slightly older
 exclusion set beats no recommendation, the same partial-results philosophy used for discovery signals.
@@ -491,6 +499,7 @@ exclusion set beats no recommendation, the same partial-results philosophy used 
 | --- | --- | --- |
 | `RECOM_CACHE_PATH` | `~/.recom/library_cache.json` | Where the cached set lives (~22 KB). [Scoped per backend](#one-store-per-backend). |
 | `RECOM_CACHE_TTL` | `21600` (6 hours) | How long a cached set stays usable. **Set to `0` to disable caching** and rebuild on every call. |
+| `RECOM_SERVED_TTL` | `7200` (2 hours) | How long a song any tool returned stays excluded from later calls. **Set to `0` to allow repeats.** |
 
 The cache is written atomically (temp file + rename), and a missing, unreadable, malformed or expired
 cache is treated as a miss rather than an error — worst case you pay the ~20s rebuild v1 always paid.

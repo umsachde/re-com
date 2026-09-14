@@ -48,6 +48,9 @@ CACHE_TTL = int(os.environ.get("RECOM_CACHE_TTL", 6 * 60 * 60))
 # How many of the most recently liked songs to re-check on every cache hit.
 # ytmusic-mcp/ytmusicapi pages this, so the real count returned is typically ~2x.
 RECENT_LIKES_LIMIT = 100
+# Seconds a song handed out by any tool stays excluded from later calls, so it
+# can't come straight back before it has been saved anywhere. <= 0 disables it.
+SERVED_TTL = int(os.environ.get("RECOM_SERVED_TTL", 2 * 60 * 60))
 
 # Mood needs a mood index for the backend's own catalogue. YouTube has an
 # editorial one (`atlas.py`); no other backend does -- Spotify forbids reading
@@ -107,6 +110,19 @@ def _library_exclusion_index():
         return match.build_index(store.library_track_meta(_store()))
     except Exception:  # noqa: BLE001 - an unavailable optimisation, never fatal
         return {}
+
+
+def _recently_served() -> set[str]:
+    import store
+
+    return store.recently_served_video_ids(_store(), SERVED_TTL)
+
+
+def _mark_served(songs: list[dict[str, Any]], tool: str) -> None:
+    import store
+
+    if SERVED_TTL > 0:
+        store.record_served(_store(), (s.get("videoId") for s in songs), tool, keep_seconds=SERVED_TTL)
 
 
 def _require_mood_support() -> None:
@@ -270,14 +286,17 @@ def _read_cache() -> tuple[set[str], float] | None:
     return ids, fetched_at
 
 
-def _write_cache(ids: set[str]) -> float:
+def _write_cache(ids: set[str], fetched_at: float | None = None) -> float:
     """Persist the exclusion set, returning the timestamp recorded for it.
 
     Written via a temp file + rename so an interrupted write can't leave a
     half-written cache behind. Failure to write is non-fatal -- the caller
     already has the data it needs.
+
+    Pass `fetched_at` to keep an existing cache's age: unioning in a few ids
+    must not make a stale full build look freshly rebuilt.
     """
-    fetched_at = time.time()
+    fetched_at = time.time() if fetched_at is None else fetched_at
     payload = json.dumps({"fetched_at": fetched_at, "video_ids": sorted(ids)})
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -383,11 +402,16 @@ def _apply_result_filters(
     match_seed_tempo: bool = False,
     expand_across_language: bool = True,
     max_per_artist: int = 2,
+    exclude: set[str] | None = None,
 ) -> dict[str, Any]:
     """Apply language and tempo filters to an already-ranked result list.
 
     Shared by the similarity tools so a filter behaves identically no matter
     which tool asked for it.
+
+    `exclude` must be the calling tool's full exclusion set. The language
+    bridge gathers brand-new candidates, and they get no other chance to be
+    checked against the library or the served set.
     """
     import filters
     import recommend as _r
@@ -430,7 +454,9 @@ def _apply_result_filters(
         # back a short list.
         if len(filtered) < limit and expand_across_language:
             filtered, added = _r.bridge_expand(
-                _client(), conn, filtered, exclude=set(), want=language,
+                _client(), conn, filtered,
+                exclude=(exclude or set()) | ({seed_video_id} if seed_video_id else set()),
+                want=language,
                 exclude_languages=exclude_languages,
                 allow_unlabelled=allow_unlabelled_language, needed=limit,
             )
@@ -448,7 +474,10 @@ def _apply_result_filters(
     if tempo_report["applied"]:
         notes.append(_r._tempo_note(tempo_report))
 
-    filtered.sort(key=lambda c: (-c.get("base_score", 0), c.get("title") or ""))
+    # Stable on score alone: `ranked` arrives in `signals._finalize`'s order,
+    # whose tie-break is source rank. A title key here silently re-alphabetised
+    # every tie after it (PLAN.md 7.15).
+    filtered.sort(key=lambda c: -c.get("base_score", 0))
 
     # Cap per artist. The mood path gets this from the sequencer; without it
     # here, one prolific artist fills the whole result -- a language filter made
@@ -564,7 +593,7 @@ def recommend_from_song(
     if same_artist_only:
         merged = _filter_same_artist(merged, seed_artist_names or ([artist] if artist else []))
 
-    exclude = _library_video_ids(yt)
+    exclude = _library_video_ids(yt) | _recently_served()
     filtering = bool(language or exclude_languages or bpm or bpm_min or bpm_max or match_seed_tempo)
     # The pool stays deep for native candidates while the searching stays
     # bounded -- both numbers together, from one place. See resolve_budgets.
@@ -580,6 +609,7 @@ def recommend_from_song(
         allow_unlabelled_language=allow_unlabelled_language,
         bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max, match_seed_tempo=match_seed_tempo,
         expand_across_language=expand_across_language, max_per_artist=max_per_artist,
+        exclude=exclude,
     )
     if variants_collapsed:
         result["notes"].insert(
@@ -590,6 +620,7 @@ def recommend_from_song(
             f"Dropped {unresolved} music-graph candidate(s) that couldn't be matched to a "
             f"song on {PROVIDER} (or turned out to be in your library after matching)."
         )
+    _mark_served(result["songs"], "recommend_from_song")
     return result
 
 
@@ -636,12 +667,13 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     )
     merged = _merge_and_score(per_seed)
 
-    exclude = _library_video_ids(yt) | {t["videoId"] for t in tracks}
+    exclude = _library_video_ids(yt) | _recently_served() | {t["videoId"] for t in tracks}
     pool, searches = resolve_budgets(limit)
     songs, _ = _finalize(
         merged, exclude, pool, exclude_index=_library_exclusion_index() if graph_conn else None
     )
     songs, _unresolved = resolve_candidates(yt, songs, limit, exclude, max_resolve=searches)
+    _mark_served(songs, "recommend_from_playlist")
     return songs
 
 
@@ -675,7 +707,7 @@ def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
         return {"artist": None, "requested": limit, "found": 0, "variants_collapsed": 0, "songs": []}
 
     catalog = _artist_song_catalog(yt, resolved["browseId"])
-    exclude = _library_video_ids(yt)
+    exclude = _library_video_ids(yt) | _recently_served()
 
     songs: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -698,6 +730,7 @@ def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
         if len(songs) >= limit:
             break
 
+    _mark_served(songs, "songs_by_artist")
     return {
         "artist": resolved.get("artist"),
         "requested": limit,
@@ -709,25 +742,42 @@ def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
 
 @mcp.tool()
 @handle_errors
-def refresh_library() -> dict[str, Any]:
-    """Rebuild the cached library exclusion set from scratch, right now.
+def refresh_library(video_ids: list[str] | None = None) -> dict[str, Any]:
+    """Update the cached library exclusion set, right now.
 
     Every recommendation tool excludes songs already in Liked Music or any of
     your playlists. That set is expensive to build (~20s), so it's cached and
     reused. Liking a song is picked up immediately regardless, but adding a
-    song to some other playlist is only seen once the cache is rebuilt.
+    song to some other playlist is only seen once the cache is updated.
 
-    Call this after adding songs to a playlist by other means (e.g. a
-    playlist-management tool) if you want the next recommendation to account
-    for them without waiting out the cache TTL.
+    Right after adding songs to a playlist by other means (e.g. a
+    playlist-management tool), pass exactly those ids as `video_ids`: they are
+    added to the cache instantly, with no rebuild. Call with no arguments to
+    rebuild the whole set from the service (~20s) -- needed only when the
+    library changed in ways you can't list, such as songs removed elsewhere.
+
+    Separately, any song a recommendation tool hands out stays excluded for
+    `served_ttl_seconds` whether or not it gets saved, so asking again doesn't
+    repeat it.
     """
-    yt = _client()
-    ids = _library_video_ids(yt, force_refresh=True)
-    return {
-        "tracks_excluded": len(ids),
-        "cache_path": str(CACHE_PATH),
-        "ttl_seconds": CACHE_TTL,
-    }
+    added = {v for v in (video_ids or []) if isinstance(v, str) and v}
+    base = {"cache_path": str(CACHE_PATH), "ttl_seconds": CACHE_TTL, "served_ttl_seconds": SERVED_TTL}
+
+    if added:
+        cached = _read_cache()
+        if cached is not None:
+            ids, fetched_at = cached
+            merged = ids | added
+            _write_cache(merged, fetched_at=fetched_at)
+            return {**base, "rebuilt": False, "added": len(added - ids), "tracks_excluded": len(merged)}
+
+    # No ids, or no usable cache to add them to: a full build. Ids passed in
+    # are still unioned, in case the service hasn't surfaced the add yet.
+    ids = _library_video_ids(_client(), force_refresh=True)
+    if added - ids:
+        ids |= added
+        _write_cache(ids)
+    return {**base, "rebuilt": True, "added": len(added), "tracks_excluded": len(ids)}
 
 
 # --- v2: mood ---------------------------------------------------------------
@@ -824,7 +874,7 @@ def recommend_for_mood(
     # idempotent, so it's cheap enough to run on every call rather than
     # needing its own cron.
     _s.infer_implicit_feedback(conn)
-    exclude = _library_video_ids(yt) | _s.rejected_video_ids(conn)
+    exclude = _library_video_ids(yt) | _s.rejected_video_ids(conn) | _recently_served()
     graph_conn = _graph()
 
     result = recommend.build(
@@ -837,6 +887,7 @@ def recommend_for_mood(
         exclude_index=_library_exclusion_index() if graph_conn else None,
     )
     _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
+    _mark_served(result["songs"], "recommend_for_mood")
     return result
 
 
@@ -916,6 +967,7 @@ def recommend_from_playlist_for_mood(
     exclude = (
         _library_video_ids(yt)
         | _s.rejected_video_ids(conn)
+        | _recently_served()
         | {t["videoId"] for t in tracks}
     )
     graph_conn = _graph()
@@ -949,6 +1001,7 @@ def recommend_from_playlist_for_mood(
         )
 
     _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
+    _mark_served(result["songs"], "recommend_from_playlist_for_mood")
     return result
 
 
