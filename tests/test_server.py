@@ -171,6 +171,32 @@ def test_result_filters_keep_finalize_order_among_ties():
     assert [s["videoId"] for s in result["songs"]] == ["t", "z", "m", "a"]
 
 
+def test_language_bridge_honours_the_callers_exclusions(monkeypatch):
+    # The bridge gathers brand-new candidates after the tool's own exclusion
+    # already ran; it used to be handed an empty set, so library and just-served
+    # songs came straight back through it.
+    import filters
+    import recommend
+    import signals
+
+    def cand(vid):
+        return {"videoId": vid, "title": vid, "artists": ["X"], "album": None, "sources": {"radio"}}
+
+    monkeypatch.setattr(server, "_client", lambda: object())
+    monkeypatch.setattr(signals, "gather_seeds", lambda yt, ids, **kw: [
+        {v: cand(v) for v in ("in_library", "just_served", "seed", "fresh")}
+    ])
+    monkeypatch.setattr(filters, "apply_language", lambda conn, c, **kw: (list(c), {"applied": True, "kept": len(c)}))
+    monkeypatch.setattr(recommend, "_language_note", lambda report, limit: "note")
+
+    survivor = {"videoId": "survivor", "title": "Survivor", "artists": ["Y"], "album": None, "score": 1, "sources": ["radio"]}
+    result = server._apply_result_filters(
+        [survivor], seed_video_id="seed", seed_title="Seed", seed_artist="Z", limit=5,
+        language=["english"], exclude={"in_library", "just_served"},
+    )
+    assert {s["videoId"] for s in result["songs"]} == {"survivor", "fresh"}
+
+
 def test_finalize_collapse_prefers_the_better_ranked_variant_at_equal_score():
     merged = {
         "v1": {**_candidate("v1", 1, title="Dead and Gone"), "rank": 8, "artists": ["T.I."]},

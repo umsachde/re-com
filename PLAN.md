@@ -835,6 +835,15 @@ from the user's side. The served set does not create this, but it makes it visib
 repeat call walks further down an alphabetical tail. The tie-break wants a real secondary key; tracked
 as §7.15.
 
+**Review found the guarantee had a hole older than this work.** When a language filter leaves
+`recommend_from_song` short, `_apply_result_filters` re-seeds from the survivors through
+`recommend.bridge_expand` — and passed it `exclude=set()`. The bridge's candidates are gathered
+after the tool's own exclusion has already run, so nothing else ever checked them: songs already
+in the library could come back through it, and after this change so could just-served ones. The
+library half predates §7.5 and was on `main`; it only surfaced because "every tool honours the
+served set" made someone trace every path that produces a song. The tool's full exclusion set,
+plus the seed, now reaches the bridge, pinned by a test that fails without it.
+
 ### 7.15 Break score ties on evidence, not the alphabet — *done; better picks, somewhat more seed-artist concentration*
 
 `signals._finalize` sorted on `(-score, title)`. Measured 2026-09-14 on *Excuses*: 27 of the top

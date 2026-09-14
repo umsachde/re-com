@@ -402,11 +402,16 @@ def _apply_result_filters(
     match_seed_tempo: bool = False,
     expand_across_language: bool = True,
     max_per_artist: int = 2,
+    exclude: set[str] | None = None,
 ) -> dict[str, Any]:
     """Apply language and tempo filters to an already-ranked result list.
 
     Shared by the similarity tools so a filter behaves identically no matter
     which tool asked for it.
+
+    `exclude` must be the calling tool's full exclusion set. The language
+    bridge gathers brand-new candidates, and they get no other chance to be
+    checked against the library or the served set.
     """
     import filters
     import recommend as _r
@@ -449,7 +454,9 @@ def _apply_result_filters(
         # back a short list.
         if len(filtered) < limit and expand_across_language:
             filtered, added = _r.bridge_expand(
-                _client(), conn, filtered, exclude=set(), want=language,
+                _client(), conn, filtered,
+                exclude=(exclude or set()) | ({seed_video_id} if seed_video_id else set()),
+                want=language,
                 exclude_languages=exclude_languages,
                 allow_unlabelled=allow_unlabelled_language, needed=limit,
             )
@@ -602,6 +609,7 @@ def recommend_from_song(
         allow_unlabelled_language=allow_unlabelled_language,
         bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max, match_seed_tempo=match_seed_tempo,
         expand_across_language=expand_across_language, max_per_artist=max_per_artist,
+        exclude=exclude,
     )
     if variants_collapsed:
         result["notes"].insert(
