@@ -387,6 +387,31 @@ async def run(args: argparse.Namespace, log: Log) -> dict[str, Any]:
     )
 
     registry = Registry()
+    permitted = set(TOOLS) | {"ToolSearch"}
+
+    async def on_tool_call(payload: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
+        """The allowlist, actually enforced.
+
+        `allowed_tools` does **not** bind under
+        `permission_mode="bypassPermissions"` -- verified by asking an agent
+        configured exactly like this one to call `record_feedback`, which was
+        not on the list, and watching it succeed. So "read-only by
+        construction" needs a hook that can say no, not a list the permission
+        mode is free to ignore.
+        """
+        name = payload.get("tool_name", "")
+        if name in permitted:
+            return {}
+        log.add("tool_denied", name=name, input=payload.get("tool_input"))
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    f"{name} is not available to this run. Only these are: {', '.join(sorted(permitted))}."
+                ),
+            }
+        }
 
     async def on_tool_result(payload: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
         name = payload.get("tool_name", "?")
@@ -430,8 +455,8 @@ async def run(args: argparse.Namespace, log: Log) -> dict[str, Any]:
         },
         allowed_tools=TOOLS,
         disallowed_tools=BUILTINS,
-        # Nothing reachable here can write, and every tool is named above --
-        # so the run is non-interactive by construction rather than by trust.
+        # Keeps the run non-interactive. It does NOT keep the run inside
+        # `allowed_tools` -- that is what the PreToolUse hook above is for.
         permission_mode="bypassPermissions",
         # The experiment is this script's configuration, not the developer's.
         # Without these two, whatever MCP servers and settings happen to be on
@@ -440,7 +465,10 @@ async def run(args: argparse.Namespace, log: Log) -> dict[str, Any]:
         setting_sources=[],
         max_turns=args.max_turns,
         cwd=str(REPO),
-        hooks={"PostToolUse": [HookMatcher(hooks=[on_tool_result])]},
+        hooks={
+            "PreToolUse": [HookMatcher(hooks=[on_tool_call])],
+            "PostToolUse": [HookMatcher(hooks=[on_tool_result])],
+        },
     )
 
     log.add("run_start", task=TASK.format(**spec), spec=spec, model=args.model,

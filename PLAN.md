@@ -901,10 +901,21 @@ That log is the deliverable.
 
 **Built 2026-09-16 as `scripts/orchestrate.py`.** The Claude Agent SDK spawns `server.py`
 itself as a stdio MCP subprocess, so the agent calls the real tool surface rather than
-in-process Python; built-in tools are named off, `strict_mcp_config` and `setting_sources=[]`
-keep the developer's own machine out of the experiment, and the seven allowed tools are all
-read-only — `record_feedback` and `refresh_library` are deliberately unreachable, so a bad plan
-cannot cost anything.
+in-process Python; built-in tools are named off, and `strict_mcp_config` with
+`setting_sources=[]` keeps the developer's own machine out of the experiment. Seven read-only
+tools are reachable; `record_feedback` and `refresh_library` are not, so a bad plan cannot cost
+anything.
+
+**That last sentence was false when it was first written, and verifying it is the only reason it
+is true now.** The restriction rested on `allowed_tools`, which **does not bind under
+`permission_mode="bypassPermissions"`** — a mode this script sets to stay non-interactive.
+Tested directly: an agent configured exactly like this one, asked to call `record_feedback` with
+the tool absent from `allowed_tools`, loaded its schema through `ToolSearch` and called it
+successfully, writing a row to the store (a redirected one, via `RECOM_DB_PATH`). The allowlist
+is now enforced by a `PreToolUse` hook that returns `permissionDecision: "deny"` for anything
+outside it, and the same probe against the shipping configuration is refused and logged as
+`tool_denied`, with no row written. A permission claim that is never tested against an agent
+actually trying to break it is a comment, not a control.
 
 **The task changed shape before any code was written, and the reason is worth keeping.** §7.7's
 own example needs song durations. **There are none** — `grep -rn duration` is empty across
@@ -931,6 +942,9 @@ engine — and an id no tool ever returned fails the run rather than being quiet
 | tool calls / turns | 7 / 8 | 8 / 9 | 6 / 7 |
 | context budget | 34,649 → 10,261 bytes | 38,661 → 12,002 bytes | 29,923 → 9,364 bytes |
 | cost | $0.35 | $0.30 | $0.32 |
+
+A fourth run, after the permission fix below, also passed (20/20, max 2 per artist, energy
+0.615 → 0.914, 9 tool calls, $0.36).
 
 **It replanned, which is the only thing that made this worth building.** Run 1's sequence:
 `index_status` to see what the backend supports → `recommend_for_mood` at energy 0.62,
