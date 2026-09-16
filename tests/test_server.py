@@ -232,6 +232,45 @@ def test_finalize_collapses_variants_keeps_higher_score():
     assert collapsed == 1
 
 
+def test_collapse_unions_the_sources_of_a_native_and_a_graph_copy():
+    """PLAN.md 7.16. Native candidates are keyed by provider id and graph ones
+    by `graph:<deezer id>`, so one song found by both arrives here as two
+    candidates at score 1. Collapse is the only place they meet; dropping the
+    loser's sources made cross-family agreement structurally uncountable.
+    """
+    merged = {
+        "v1": {**_candidate("v1", 1, title="Holiday"), "artists": ["Green Day"]},
+        "graph:99": {
+            **_candidate("graph:99", 1, title="Holiday", sources=("graph_similar_lfm",)),
+            "artists": ["Green Day"], "videoId": None,
+            "graphRef": {"trackId": 99, "artistId": 7},
+        },
+    }
+    out, collapsed = _finalize(merged, exclude=set(), limit=10)
+
+    assert collapsed == 1
+    assert len(out) == 1
+    assert out[0]["sources"] == ["graph_similar_lfm", "radio"]
+    assert out[0]["score"] == 2, "two independent sources named this song; that is agreement"
+
+
+def test_collapse_still_picks_the_representative_on_pre_union_score():
+    """Unioning evidence must not change *which* variant represents the
+    cluster -- that is still the better-corroborated one, judged before any
+    summing, or a pile of single-signal variants could outvote it."""
+    merged = {
+        "weak": {**_candidate("weak", 1, title="Dead and Gone"), "artists": ["T.I."], "rank": 0},
+        "strong": {
+            **_candidate("strong", 3, title="Dead and Gone (feat. Justin Timberlake)",
+                         sources=("radio", "related", "artist")),
+            "artists": ["T.I.", "Justin Timberlake"], "rank": 5,
+        },
+    }
+    out, _ = _finalize(merged, exclude=set(), limit=10)
+    assert [c["videoId"] for c in out] == ["strong"]
+    assert out[0]["score"] == 4
+
+
 # --- _liked_video_ids --------------------------------------------------
 
 
