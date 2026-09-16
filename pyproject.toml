@@ -15,6 +15,9 @@ dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0"]
 # Optional: mood labelling by reading lyrics with Claude. Everything else works
 # without it, on mood-playlist membership and artist propagation alone.
 llm = ["anthropic>=0.40"]
+# Optional: the v0 orchestration experiment (scripts/orchestrate.py, PLAN.md
+# 7.7). Nothing in the engine or the live path imports it.
+agent = ["claude-agent-sdk>=0.2"]
 
 [project.urls]
 Homepage = "https://github.com/umsachde/re-com"
