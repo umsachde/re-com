@@ -610,6 +610,7 @@ a single seed on the calling thread. So verification is split three ways:
 | `pytest` | CI, every push | pure logic against fakes — no network, no credentials |
 | `scripts/smoke_all.py` | by hand, before a release | every tool × every backend, against the real account |
 | `scripts/quality_check.py` | by hand, when ranking changes | mood fit, cross-mood overlap, distinctiveness; with `--similarity`, signal agreement, artist concentration, cross-seed overlap and the native-vs-graph A/B |
+| `scripts/orchestrate.py` | by hand, an experiment | the v0 agent loop over the MCP tools (PLAN.md 7.7) — whether an agent can satisfy constraints no single tool call does. Needs `pip install -e ".[agent]"` and spends tokens per run |
 
 `tests/test_graph_concurrency.py` is the deliberate exception to "no real resources": it runs a
 **real** graph connection across a **real** thread pool, because that's the one shape a fake

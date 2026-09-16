@@ -536,7 +536,7 @@ Dead candidates are dropped and the arc re-sequenced, up to `_RESOLVE_ROUNDS`.
 ## 7. Roadmap
 
 Ranked by what the project actually needs, not by size, as of when each item was written;
-numbered in the order items were added. Open: 7.6, 7.7, 7.9. Everything else is done
+numbered in the order items were added. Open: 7.6, 7.9. Everything else is done
 or closed with its result recorded. (7.8, Movies & TV, moved out to a sibling project —
 `re-com-movies` — and is tracked there, not here.)
 
@@ -872,7 +872,7 @@ gated on capability like the native signals are, but the tool docs must say plai
 Music only" rather than let a Spotify user believe their dislikes are respected when the
 mechanism to observe them doesn't exist for that backend.
 
-### 7.7 An agentic orchestration layer
+### 7.7 An agentic orchestration layer — *v0 done; the loop works, and it is not the pipeline*
 
 Everything above is a fixed pipeline: given inputs, a predetermined sequence of calls runs.
 The tool *definitions* are well-designed, but nothing in re-com decides at runtime which
@@ -898,6 +898,72 @@ v0 scope: one script, one test task with a **checkable** success condition (sum 
 check the arc, count artist repeats — pass/fail, not a vibe check), a deliberately small
 context budget so the trim decision matters, and a log of the plan the agent actually took.
 That log is the deliverable.
+
+**Built 2026-09-16 as `scripts/orchestrate.py`.** The Claude Agent SDK spawns `server.py`
+itself as a stdio MCP subprocess, so the agent calls the real tool surface rather than
+in-process Python; built-in tools are named off, `strict_mcp_config` and `setting_sources=[]`
+keep the developer's own machine out of the experiment, and the seven allowed tools are all
+read-only — `record_feedback` and `refresh_library` are deliberately unreachable, so a bad plan
+cannot cost anything.
+
+**The task changed shape before any code was written, and the reason is worth keeping.** §7.7's
+own example needs song durations. **There are none** — `grep -rn duration` is empty across
+re-com, `ytmusic-mcp` and `spotify-mcp`. Deezer returns `duration` on the same `/track/{id}`
+payload `tempo.lookup` already fetches for BPM, so it is *addable*, but that is a schema change
+and a crawl, and it would have been discovered halfway through building the agent. v0 therefore
+drops duration for count-based constraints and changes nothing in the engine: **20 distinct
+songs, no artist more than twice across the whole set, at least 15 genuine matches rather than
+filler, and energy rising from the first half to the second.**
+
+**The checker reads re-com's output, not the agent's claims.** A registry captures every song as
+the tool reported it, before trimming; the agent's final answer is only a list of `videoId`s. So
+a run cannot pass by asserting its picks were well-rated — `rated` and `mood` come from the
+engine — and an id no tool ever returned fails the run rather than being quietly dropped.
+
+**Measured, YouTube, two consecutive runs.** Both **PASS**:
+
+| | run 1 | run 2 |
+| --- | --- | --- |
+| count / distinct | 20 / 20 | 20 / 20 |
+| max per artist | 2 (The Weeknd) | 1 (Shakira) |
+| rated | 20/20 | 20/20 |
+| energy, first half → second | 0.626 → 0.845 | 0.703 → 0.842 |
+| tool calls / turns | 7 / 8 | 8 / 9 |
+| context budget | 34,649 → 10,261 bytes | 38,661 → 12,002 bytes |
+| cost | $0.35 | $0.30 |
+
+**It replanned, which is the only thing that made this worth building.** Run 1's sequence:
+`index_status` to see what the backend supports → `recommend_for_mood` at energy 0.62,
+`arc="lift"`, **BPM-filtered 140–180** → read the result's own notes ("17 dropped as out of
+range; 220 kept with unknown BPM") and `match_quality` (18 genuine of 20) → **dropped the BPM
+filter** and fanned out across energy tiers (0.68 `arc="lift"`, 0.88 `arc="hold"`) → added a
+`language=["english"]` narrowing, which came back 7 genuine and 3 filler. Then it counted
+artists across all four calls itself — the final set has The Weeknd exactly twice, a cap
+`arc.sequence` only enforces *within* one call. Four distinct query shapes, each chosen from
+what the previous result admitted about itself. §7.1–7.3's sequencing argument held: it replanned
+on the tools' honesty, not on vibes.
+
+**A defect in the harness, found the way §5 says they get found.** The first full run had every
+tool appear to fail. The cause was in the trim hook, not the engine: an MCP tool's output must
+be returned as content blocks, and replacing it with the bare object crashes the CLI measuring
+the response (`'e.reduce' is undefined`). What makes it worth recording is the agent's response —
+it refused to build the set from its own knowledge of running tracks, said so explicitly ("a
+hand-written 20-song list would look plausible, carry fabricated videoIds, and silently fail
+every downstream check"), and diagnosed the payload as malformed. The registry would have caught
+a fabricated set anyway; it never had to.
+
+**Two costs recorded rather than buried.** The harness defers MCP tools, so two of every run's
+turns go to `ToolSearch` discovery before any music work starts. And the byte cap bound on one
+result in run 1 and none in run 2 — compaction alone (song lists to one line each, `seeds` and
+`filters` dropped, `notes` and `match_quality` kept verbatim) already does most of the work at
+this scale, cutting results ~70%. The cap is what would matter at crawl scale; at this size it is
+mostly the compaction.
+
+**What v0 does not settle.** Whether the loop is worth its cost against just calling
+`recommend_for_mood` once — the constraints were chosen so one call *cannot* satisfy them, which
+proves the loop works, not that it earns $0.30 and three minutes for a normal request. Also
+untested: Spotify (same reason as §7.16 — no credentials configured here), multi-step session
+state, and the playlist handoff, which stays a by-hand skill.
 
 **Sequence it after 7.1–7.3.** An agent that replans on bad intermediate results is only as
 good as the tools' honesty about being bad. Build it first and it replans on vibes.
@@ -1443,3 +1509,18 @@ re-litigated here. Left open: the Spotify prediction (near-zero effect, no nativ
 fragment against) couldn't be checked live in this environment for lack of configured
 `spotify-mcp` credentials, and whether §7.12's same-artist defect narrows now that agreement
 counts correctly.
+
+**2026-09-16 — something above the pipeline decides.** §7.7 v0: `scripts/orchestrate.py`, a
+Claude Agent SDK loop that spawns `server.py` as a stdio MCP subprocess and works a goal no
+single call satisfies — 20 songs, no artist more than twice *across calls*, 15 genuine matches,
+energy rising. Two consecutive live runs passed every constraint, each by a different route: the
+agent probed `index_status`, tried a BPM-filtered query, read the shortfall out of the result's
+own `notes` and `match_quality`, dropped the filter, fanned across energy tiers, and counted
+artists itself. The task lost §7.7's 45-minute framing before any code existed, because durations
+exist nowhere in re-com or either sibling server; count-based constraints kept v0 to one script
+with zero engine changes. Two design choices did the real work: the checker reads songs as the
+*tool* reported them, so a run cannot pass on the agent's say-so, and the context hook keeps
+`notes`/`match_quality` verbatim while compacting song lists ~70% — trimming the signals the
+agent replans on would have measured nothing. The one defect was in the harness (an MCP result
+must go back as content blocks), and the agent met it by refusing to invent songs and reporting
+the engine as broken.
