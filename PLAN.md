@@ -1329,6 +1329,23 @@ more counted agreement pulls in more of the seed artist's own well-corroborated 
 cross-seed overlap and distinct-song count barely moved. Not re-litigated: the same tradeoff §7.15
 already accepted and bounded (`recommend_from_song`'s 2-per-artist cap).
 
+**A known overcount, measured rather than assumed (2026-09-16).** Summing scores across a cluster
+breaks `score`'s documented meaning — "the number of distinct (seed, source) pairs" — whenever one
+source surfaced two variants of the same song, because that pair then gets counted twice. It
+cannot happen across the native/graph families (their source names are disjoint, which is the case
+this change exists for), only within one. Measured over `SIMILARITY_SEEDS`: **16 of 89**
+multi-member clusters overcount, 211 summed against 190 true distinct sources. The effect on the
+headline is small enough to leave: corroborated **0.922** under the shipped rule against **0.911**
+scoring on distinct sources instead — a 0.011 gap, far inside the 0.84–0.86 noise floor, and only
+one seed (*Brown Munde*, 0.6 vs 0.5) moves at all. So §7.16's result stands, but the invariant is
+violated and the honest fix is to carry the `(seed, source)` pairs through `_merge_and_score`
+rather than a count. Not done here because it changes `score` for every ranking path, which needs
+its own before/after.
+
+**Pinned by tests as of 2026-09-16, which it was not when it shipped.** The original change had no
+test: reverting it entirely left all 652 green. `test_collapse_unions_the_sources_of_a_native_and_a_graph_copy`
+and `test_collapse_still_picks_the_representative_on_pre_union_score` both fail without it.
+
 **Still open:** the Spotify prediction above, and whether §7.12's same-artist defect narrows now
 that corroboration counts correctly — re-baseline that number before proposing anything further
 for it.
