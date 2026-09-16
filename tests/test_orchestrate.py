@@ -162,8 +162,24 @@ def test_a_compacted_song_still_says_what_it_is():
 def test_trim_truncates_only_when_compaction_was_not_enough_and_says_so():
     trimmed, report = orchestrate.trim(_result_payload(40), budget=500)
     assert report["songs_dropped"] > 0
-    assert len(json.dumps(trimmed)) <= 500 + len(trimmed.get("truncated", ""))
     assert "dropped to fit the context budget" in trimmed["truncated"]
+
+
+def test_a_trimmed_result_actually_fits_the_budget_including_its_own_notice():
+    """The notice counts. Appending it after the fit loop put every truncated
+    result back over the cap it had just been trimmed to meet."""
+    for budget in (2000, 1000, 500):
+        trimmed, report = orchestrate.trim(_result_payload(40), budget=budget)
+        assert len(json.dumps(trimmed)) <= budget, f"budget {budget} overshot"
+        assert not report["over_budget"]
+
+
+def test_a_budget_below_the_untrimmable_floor_is_reported_not_faked():
+    """`notes` and `match_quality` are never trimmed, so a tiny budget cannot
+    be met -- the report must say so rather than claim a fit."""
+    trimmed, report = orchestrate.trim(_result_payload(40), budget=50)
+    assert report["over_budget"]
+    assert trimmed["notes"] == ["Only 12 songs genuinely matched this mood"]
 
 
 def test_trim_leaves_a_payload_with_no_songs_alone():

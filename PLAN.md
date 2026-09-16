@@ -920,17 +920,17 @@ the tool reported it, before trimming; the agent's final answer is only a list o
 a run cannot pass by asserting its picks were well-rated — `rated` and `mood` come from the
 engine — and an id no tool ever returned fails the run rather than being quietly dropped.
 
-**Measured, YouTube, two consecutive runs.** Both **PASS**:
+**Measured, YouTube, three consecutive runs.** All three **PASS**:
 
-| | run 1 | run 2 |
-| --- | --- | --- |
-| count / distinct | 20 / 20 | 20 / 20 |
-| max per artist | 2 (The Weeknd) | 1 (Shakira) |
-| rated | 20/20 | 20/20 |
-| energy, first half → second | 0.626 → 0.845 | 0.703 → 0.842 |
-| tool calls / turns | 7 / 8 | 8 / 9 |
-| context budget | 34,649 → 10,261 bytes | 38,661 → 12,002 bytes |
-| cost | $0.35 | $0.30 |
+| | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| count / distinct | 20 / 20 | 20 / 20 | 20 / 20 |
+| max per artist | 2 (The Weeknd) | 1 (Shakira) | 2 (Calvin Harris) |
+| rated | 20/20 | 20/20 | 20/20 |
+| energy, first half → second | 0.626 → 0.845 | 0.703 → 0.842 | 0.662 → 0.831 |
+| tool calls / turns | 7 / 8 | 8 / 9 | 6 / 7 |
+| context budget | 34,649 → 10,261 bytes | 38,661 → 12,002 bytes | 29,923 → 9,364 bytes |
+| cost | $0.35 | $0.30 | $0.32 |
 
 **It replanned, which is the only thing that made this worth building.** Run 1's sequence:
 `index_status` to see what the backend supports → `recommend_for_mood` at energy 0.62,
@@ -952,10 +952,19 @@ hand-written 20-song list would look plausible, carry fabricated videoIds, and s
 every downstream check"), and diagnosed the payload as malformed. The registry would have caught
 a fabricated set anyway; it never had to.
 
+**A second defect, found by verifying rather than by running.** The budget did not bind to the
+number it claimed: the "N songs were dropped" notice was appended *after* the fit loop, so every
+truncated result came back over the cap it had just been trimmed to meet — 2,082 bytes against a
+2,000-byte budget live, and ~2.5x over at small budgets. The test written alongside it asserted
+`<= budget + len(notice)`, which is a test shaped around the defect rather than one that could
+catch it. Now the notice is counted inside the loop (2,082 → 1,972 live), and where the budget is
+structurally unmeetable — `notes` and `match_quality` are never trimmed — the report says
+`over_budget` instead of claiming a fit that did not happen.
+
 **Two costs recorded rather than buried.** The harness defers MCP tools, so two of every run's
 turns go to `ToolSearch` discovery before any music work starts. And the byte cap bound on one
-result in run 1 and none in run 2 — compaction alone (song lists to one line each, `seeds` and
-`filters` dropped, `notes` and `match_quality` kept verbatim) already does most of the work at
+result in runs 1 and 3 and none in run 2 — compaction alone (song lists to one line each, `seeds`
+and `filters` dropped, `notes` and `match_quality` kept verbatim) already does most of the work at
 this scale, cutting results ~70%. The cap is what would matter at crawl scale; at this size it is
 mostly the compaction.
 

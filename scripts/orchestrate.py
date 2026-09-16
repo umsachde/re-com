@@ -221,16 +221,30 @@ def trim(payload: Any, budget: int) -> tuple[Any, dict[str, Any]]:
     report["compacted"] = True
     report["songs_in"] = len(payload["songs"])
 
-    while len(json.dumps(out, default=str)) > budget and out["songs"]:
-        out["songs"].pop()
-        report["songs_dropped"] += 1
-    if report["songs_dropped"]:
-        out["truncated"] = (
-            f"{report['songs_dropped']} more song(s) were returned but dropped to fit the "
+    def _notice(dropped: int) -> str:
+        return (
+            f"{dropped} more song(s) were returned but dropped to fit the "
             "context budget. Ask for a smaller limit if you need to see them all."
         )
 
+    # The notice counts against the budget like everything else. Adding it after
+    # the loop instead put every truncated result over the cap it had just been
+    # trimmed to fit -- a 2000-byte budget returning 2091 bytes.
+    while out["songs"]:
+        candidate = dict(out)
+        if report["songs_dropped"]:
+            candidate["truncated"] = _notice(report["songs_dropped"])
+        if len(json.dumps(candidate, default=str)) <= budget:
+            break
+        out["songs"].pop()
+        report["songs_dropped"] += 1
+    if report["songs_dropped"]:
+        out["truncated"] = _notice(report["songs_dropped"])
+
     report["bytes_after"] = len(json.dumps(out, default=str))
+    # `notes` and `match_quality` are never trimmed, so a small enough budget
+    # cannot be met. Say so rather than reporting a fit that did not happen.
+    report["over_budget"] = report["bytes_after"] > budget
     report["songs_kept"] = len(out["songs"])
     return out, report
 
