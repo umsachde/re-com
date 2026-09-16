@@ -456,8 +456,8 @@ _song_key = match.song_key
 
 
 def _collapse_variants(pool: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], int]:
-    """Collapse remix/feature variants of the same underlying song down to
-    one candidate each, keeping the highest-scoring variant.
+    """Collapse remix/feature variants -- and, just as often, one song found
+    under two unrelated keys -- down to one candidate each.
 
     "Dead and Gone" and "Dead and Gone (feat. Justin Timberlake)" are both
     legitimate candidates on their own -- different videoIds, sometimes
@@ -465,6 +465,21 @@ def _collapse_variants(pool: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[
     never hand back both. This runs on the whole candidate pool before
     ranking/truncation/slotting, not after: collapsing post-truncation would
     just leave a gap instead of letting the next-best distinct song in.
+
+    **A cluster's sources are unioned and its scores summed onto the kept
+    variant, not discarded (PLAN.md 7.16).** Native candidates are keyed by
+    provider id and graph candidates by `graph:<deezer id>`, so
+    `_merge_and_score` never merges a song that (say) YouTube radio and
+    last.fm both named -- they arrive here as two separate candidates at
+    score 1 each, and this is the only place they meet. Measured on
+    `quality_check.SIMILARITY_SEEDS` (YouTube, 2026-09-15): 70 of 81
+    multi-member clusters mixed a native and a graph candidate for the same
+    song, and treating that as agreement instead of dropping the loser's
+    evidence moved the corroborated share 0.611 -> 0.826. Which variant's
+    title/artist/videoId represents the cluster is still decided by the old
+    (score, rank) rule on the *pre-union* numbers, so a real higher-signal
+    variant (e.g. the feat. version three sources named) still wins over a
+    single-signal one -- only the winner's own score and sources change.
     """
     buckets: dict[str, list[str]] = {}
     for vid, c in pool.items():
@@ -491,7 +506,11 @@ def _collapse_variants(pool: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[
                 collapsed[cluster[0]] = pool[cluster[0]]
                 continue
             best = max(cluster, key=lambda v: (pool[v].get("score", 0), -pool[v].get("rank", _UNRANKED)))
-            collapsed[best] = pool[best]
+            winner = dict(pool[best])
+            winner["sources"] = set().union(*(pool[v]["sources"] for v in cluster))
+            winner["score"] = sum(pool[v].get("score", 0) for v in cluster)
+            winner["rank"] = min(pool[v].get("rank", _UNRANKED) for v in cluster)
+            collapsed[best] = winner
             dropped += len(cluster) - 1
 
     return collapsed, dropped

@@ -536,7 +536,7 @@ Dead candidates are dropped and the arc re-sequenced, up to `_RESOLVE_ROUNDS`.
 ## 7. Roadmap
 
 Ranked by what the project actually needs, not by size, as of when each item was written;
-numbered in the order items were added. Open: 7.6, 7.7, 7.8, 7.9, 7.16. Everything else is done
+numbered in the order items were added. Open: 7.6, 7.7, 7.8, 7.9. Everything else is done
 or closed with its result recorded.
 
 ### 7.1 Verification across tools × backends — *done*
@@ -1278,7 +1278,7 @@ Out of scope and noted: the harness's `_run_similarity` does not drop re-uploads
 way `_apply_result_filters` does, so its per-seed lists can include the seed song under other
 ids (*Kryptonite* ×3 in the title arm). The tool is unaffected.
 
-### 7.16 Corroboration on the similarity path — *open; investigate before proposing*
+### 7.16 Corroboration on the similarity path — *done*
 
 The problem §7.15 made visible rather than solved. On *Excuses* (YouTube, 2026-09-14) 27 of the
 top 30 candidates rest on a single source, so ordering within that tail is the only lever left
@@ -1294,22 +1294,48 @@ the same shortage seen from another angle.
 - *Recent Bollywood film songs via last.fm/ListenBrainz.* §7.13/§7.14: empty under both performer
   and composer credits for most titles probed; a data gap, not a query bug.
 
-**The first lead is in the code, not in a new source.** Native candidates are keyed by provider id,
+**The lead was in the code, not in a new source.** Native candidates are keyed by provider id,
 graph candidates by `graph:<deezer id>` (`signals._add_graph_candidates`), so `_merge_and_score`
-never merges a song that YouTube radio and, say, last.fm both named — they stay two candidates at
-score 1 each. The only place they meet is `_collapse_variants`, which keeps the higher-scoring copy
-and **drops the other's sources rather than unioning them**. Agreement between the native and graph
-families is therefore structurally uncountable on YouTube. Read from the code, **not yet measured**:
-how often it happens decides whether this is the fix or a footnote.
+never merges a song that YouTube radio and, say, last.fm both named — they stayed two candidates at
+score 1 each. The only place they met was `_collapse_variants`, which kept the higher-scoring copy
+and **dropped the other's sources rather than unioning them**. Agreement between the native and
+graph families was therefore structurally uncountable on YouTube.
 
-**Next step, measurement only.** Over `quality_check.SIMILARITY_SEEDS`, count for each seed how
-many collapsed clusters contain both a native and a graph candidate, and what the corroborated
-share would be if collapse unioned `sources` and summed score. Report per catalogue (western /
-South Asian), against the same-pool method from §7.15 so the number is free of YouTube's noise
-floor. Spotify cannot show this effect — it has no native signals to fragment against — which is
-also a prediction worth checking. Only if that count is material does a change get proposed, and
-then the obvious one (union on collapse) still has to be measured for concentration, since more
-agreement can also mean more of the seed artist.
+**Measured before proposing, per the plan above.** `scripts/measure_corroboration.py` gathers each
+`quality_check.SIMILARITY_SEEDS` seed's pool once, replicates `_collapse_variants`'s own clustering,
+and counts clusters that mix a native-keyed and a graph-keyed candidate for the same song. Live on
+YouTube, 2026-09-15: **70 of 81 multi-member clusters were mixed** — not a footnote. Corroborated
+share would move 0.611 → 0.826 under the counterfactual (western 0.6 → 0.9, South Asian
+0.62 → 0.767). Spotify could not be checked live in this environment (`spotify-mcp` had no
+credentials configured here); the prediction that it shows near-zero effect, having no native
+signals to fragment against, is still open.
+
+**Built.** `_collapse_variants` now unions `sources` and sums `score` across a cluster onto the
+kept variant, instead of discarding the losers' evidence; which variant's title/artist/videoId
+represents the cluster is still chosen by the old `(score, rank)` rule on the *pre-union* numbers,
+so a genuinely better-corroborated variant still wins over a single-signal one. Pure evidence
+bookkeeping — no new source, no ranking-formula change.
+
+**Verified live, YouTube, `quality_check.py --similarity --repeat`, same account, before/after:**
+
+| | before | after |
+| --- | --- | --- |
+| corroborated | 0.59 | 0.87 |
+| concentration (HHI) | 0.274 | 0.312 |
+| cross-seed overlap | 0.024 | 0.027 |
+| distinct / slots | 90/100 | 89/100 |
+| corroboration delta (graph vs native) | +0.08 | +0.27 |
+| noise floor | 0.86 | 0.84 |
+
+Both corroborated numbers clear their own noise floor by a wide margin, so this is signal, not
+variance. The predicted cost from §7.15 landed exactly where expected: HHI rose (0.274 → 0.312) —
+more counted agreement pulls in more of the seed artist's own well-corroborated songs — while
+cross-seed overlap and distinct-song count barely moved. Not re-litigated: the same tradeoff §7.15
+already accepted and bounded (`recommend_from_song`'s 2-per-artist cap).
+
+**Still open:** the Spotify prediction above, and whether §7.12's same-artist defect narrows now
+that corroboration counts correctly — re-baseline that number before proposing anything further
+for it.
 
 ---
 
@@ -1406,3 +1432,18 @@ as "couldn't be matched", telling the user 20 failures where 7 were real; and
 `quality_check.py` carried its own copy of the pool sizing, so it went on reporting a short
 result the fixed server no longer produced — §5's argument turned on the verification layer
 itself. YouTube now fills 100/100 with 85 distinct songs, against §7.2's 82.
+
+**2026-09-15 — corroboration stopped being uncountable across families.** §7.16: measured before
+proposing, per its own plan. `scripts/measure_corroboration.py` (new, read-only) found 70 of 81
+multi-member `_collapse_variants` clusters on YouTube mixed a native-keyed candidate with a
+graph-keyed candidate for the same song — material, not a footnote. The fix was pure evidence
+bookkeeping: `_collapse_variants` now unions `sources` and sums `score` onto the kept variant
+instead of discarding the losers', while still picking *which* variant represents the cluster by
+the old `(score, rank)` rule on pre-union numbers. Verified live, same account, before/after:
+corroborated 0.59 → 0.87, both well clear of the 0.84–0.86 noise floor. The predicted cost landed
+exactly as §7.15 foresaw — HHI 0.274 → 0.312, cross-seed overlap and distinct-song count barely
+moved — and is the same tradeoff already bounded by `recommend_from_song`'s per-artist cap, not
+re-litigated here. Left open: the Spotify prediction (near-zero effect, no native signals to
+fragment against) couldn't be checked live in this environment for lack of configured
+`spotify-mcp` credentials, and whether §7.12's same-artist defect narrows now that agreement
+counts correctly.
