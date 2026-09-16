@@ -536,8 +536,9 @@ Dead candidates are dropped and the arc re-sequenced, up to `_RESOLVE_ROUNDS`.
 ## 7. Roadmap
 
 Ranked by what the project actually needs, not by size, as of when each item was written;
-numbered in the order items were added. Open: 7.6, 7.7, 7.8, 7.9. Everything else is done
-or closed with its result recorded.
+numbered in the order items were added. Open: 7.6, 7.7, 7.9. Everything else is done
+or closed with its result recorded. (7.8, Movies & TV, moved out to a sibling project —
+`re-com-movies` — and is tracked there, not here.)
 
 ### 7.1 Verification across tools × backends — *done*
 
@@ -862,6 +863,15 @@ second filter path.
 again in a 200-item window is never observed. That must be stated plainly in the tool docs
 rather than implying a Liked-Music-grade guarantee.
 
+**One-backend only, and staying that way — say so, don't hide it.** YouTube Music's
+`likeStatus` has no Spotify analogue; there is no equivalent history field to read there, and
+none is coming. Unlike the native radio/related/artist signals (§4, provider-gated because a
+Spotify user still gets a fully-functional engine with fewer inputs feeding *ranking*), this is
+a user-facing exclusion *guarantee*, and on Spotify it would just silently never apply. Ship it
+gated on capability like the native signals are, but the tool docs must say plainly "YouTube
+Music only" rather than let a Spotify user believe their dislikes are respected when the
+mechanism to observe them doesn't exist for that backend.
+
 ### 7.7 An agentic orchestration layer
 
 Everything above is a fixed pipeline: given inputs, a predetermined sequence of calls runs.
@@ -891,20 +901,6 @@ That log is the deliverable.
 
 **Sequence it after 7.1–7.3.** An agent that replans on bad intermediate results is only as
 good as the tools' honesty about being bad. Build it first and it replans on vibes.
-
-### 7.8 Movies & TV — a sibling project, not a feature
-
-Recommending films the way re-com recommends songs is a bigger fork than adding Spotify was.
-v3 worked because `signals.py` and `recommend.py` needed **zero changes** — only the client
-and its shape translation. Movies have no sibling `*-mcp` server playing ytmusic-mcp's role
-(owns auth, exposes watched history, exposes catalogue + related signals); that server would
-have to be built first.
-
-This is closer to standing up `re-com-movies` — its own `trakt-mcp`/`tmdb-mcp`, its own
-`Provider`, its own signal design — than extending this one. Reasonable first slice: the
-sibling auth server and a single `recommend_from_title` against TMDb's `/similar` +
-`/recommendations` alone, with **no** watched-history exclusion yet, documented as a known
-gap, before deciding whether Trakt is worth a second OAuth integration just for that.
 
 ### 7.9 Smaller items
 
