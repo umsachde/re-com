@@ -536,9 +536,10 @@ Dead candidates are dropped and the arc re-sequenced, up to `_RESOLVE_ROUNDS`.
 ## 7. Roadmap
 
 Ranked by what the project actually needs, not by size, as of when each item was written;
-numbered in the order items were added. Open: 7.6, 7.9. Everything else is done
-or closed with its result recorded. (7.8, Movies & TV, moved out to a sibling project —
-`re-com-movies` — and is tracked there, not here.)
+numbered in the order items were added. Open: the same-artist defect §7.16 re-baselined, which
+split rather than closed. Everything else, including all of 7.9, is done or closed with its
+result recorded. (7.8, Movies & TV, moved out to a sibling project — `re-com-movies` — and is
+tracked there, not here. 7.6, respecting native dislikes, was dropped rather than built.)
 
 ### 7.1 Verification across tools × backends — *done*
 
@@ -847,31 +848,6 @@ library half predates §7.5 and was on `main`; it only surfaced because "every t
 served set" made someone trace every path that produces a song. The tool's full exclusion set,
 plus the seed, now reaches the bridge, pinned by a test that fails without it.
 
-### 7.6 Respect native dislikes
-
-Never recommend a song thumbs-downed on the service, the way Liked Music is already excluded.
-
-**There is no bulk API for this.** `ytmusicapi` has `get_liked_songs()` but no
-`get_disliked_songs()`. A song's `likeStatus` is exposed only per-song or inside
-`get_history()`'s most recent 200 items. So this has to be a **persistent log, not a
-snapshot fetch**: extend `scripts/snapshot_history.py` (already on a cron) to read
-`likeStatus` off each history item and upsert into `feedback` with `source="native_dislike"`,
-reusing the existing `rejected_video_ids()` exclusion machinery rather than inventing a
-second filter path.
-
-**Coverage will be partial and grows only over time** — a song disliked once and never seen
-again in a 200-item window is never observed. That must be stated plainly in the tool docs
-rather than implying a Liked-Music-grade guarantee.
-
-**One-backend only, and staying that way — say so, don't hide it.** YouTube Music's
-`likeStatus` has no Spotify analogue; there is no equivalent history field to read there, and
-none is coming. Unlike the native radio/related/artist signals (§4, provider-gated because a
-Spotify user still gets a fully-functional engine with fewer inputs feeding *ranking*), this is
-a user-facing exclusion *guarantee*, and on Spotify it would just silently never apply. Ship it
-gated on capability like the native signals are, but the tool docs must say plainly "YouTube
-Music only" rather than let a Spotify user believe their dislikes are respected when the
-mechanism to observe them doesn't exist for that backend.
-
 ### 7.7 An agentic orchestration layer — *v0 done; the loop works, and it is not the pipeline*
 
 Everything above is a fixed pipeline: given inputs, a predetermined sequence of calls runs.
@@ -993,17 +969,50 @@ good as the tools' honesty about being bad. Build it first and it replans on vib
 
 ### 7.9 Smaller items
 
-- `server.py` is ~1,100 lines with tool bodies doing filter + store + resolve orchestration
-  inline. Worth extracting a `tools/` layer.
-- `ytmusicapi` is a hard top-level dependency that the live path never imports — only the
+- ~~`server.py` is ~1,100 lines with tool bodies doing filter + store + resolve orchestration
+  inline. Worth extracting a `tools/` layer.~~ **Done 2026-09-16.** All 9 `@mcp.tool()`
+  bodies moved to `tools/{similarity,library,mood,feedback,status}.py`, grouped by what they
+  do rather than one file per tool. `server.py` keeps registration, docstrings (the tool
+  contract), and the shared infrastructure every tool body calls into (`_client`, `_store`,
+  `_graph`, `_library_video_ids`, the `signals.py` re-exports) — each `@mcp.tool()` function is
+  now a thin wrapper that forwards its arguments to `tools.<module>.<name>` and returns the
+  result, docstring untouched. `tools/*.py` do `import server` and read `server.X` fresh on
+  every call rather than `from server import X`, specifically so the existing
+  `monkeypatch.setattr(server, "_client", ...)`-style tests keep working unchanged from the
+  outside — none of ~661 tests needed a new fixture, only one
+  (`test_server_takes_both_budgets_from_one_place`) needed updating, because it used
+  `inspect.getsource` to assert the *implementation* calls `resolve_candidates`/
+  `resolve_budgets`, and that implementation is what moved. `server.py`: 1,193 → 899 lines;
+  `tools/`: 505 new lines across 5 files. Verified live (index_status, recommend_from_song)
+  against the real account after the move, not just against the unit suite.
+- ~~`ytmusicapi` is a hard top-level dependency that the live path never imports — only the
   offline scripts use it. It belongs in an extra; a Spotify-only install currently pulls in
-  a YouTube Music client it never calls.
+  a YouTube Music client it never calls.~~ **Done 2026-09-16.** Confirmed first, not assumed:
+  `grep`ing every `import ytmusicapi` across the repo showed it reachable only from offline
+  scripts (`build_atlas.py`, `build_genres.py`, `maintain.py`, `setup_auth*.py`) and `lyrics.py`
+  and `atlas.py` (imported by `label_library.py` and tests, not by `server.py`). `taxonomy.py`
+  only *mentions* `ytmusicapi` in comments — no import. Moved to a `youtube` extra in
+  `pyproject.toml`; `dev` keeps its own copy since `test_v2.py`/`test_v6.py` import
+  `ytmusicapi.exceptions` directly. All 656 tests still pass with a plain `pip install -e .`
+  install pulling in nothing YouTube-specific.
 - The offline maintenance scripts still authenticate directly with their own
   `headers_auth.json` rather than going through `ytmusic-mcp`. Deliberate — they are bulk
   indexing jobs, not part of the live path — but it means two unrelated credentials exist.
-- §7.3 added a MusicBrainz lookup at 1.2s throttled per *artist* to the live path. Cached
+- ~~§7.3 added a MusicBrainz lookup at 1.2s throttled per *artist* to the live path. Cached
   permanently and only on a cold artist, but it belongs in `scripts/maintain.py` (§7.4) as a
-  warm-ahead job rather than being paid in a user's first request for that artist.
+  warm-ahead job rather than being paid in a user's first request for that artist.~~ **Done
+  2026-09-16.** `scripts/maintain.py` gained a 5th stage: `_pending_brainz_artists` finds every
+  distinct library artist with no `brainz_artist` row yet (filtered *before* the bounded limit,
+  the same lesson §7.11 already paid for on the tempo stage — truncating first re-checks cached
+  rows and never reaches the rest), and `brainz.resolve_artist` runs on each, same permanent
+  cache the live path already writes to. Bounded to 40/run by default, matching the other
+  stages' shape; `--full` lifts it. Gated on `server.GRAPH_ENABLED`, since the warm-up only
+  matters when graph candidates run at all. 5 new tests cover the selection logic (cached,
+  cached-negative, out-of-library, and the limit); `brainz.resolve_artist` itself was already
+  exercised live this session via `quality_check.py --similarity`, so the new code is only the
+  selection query, checked against the real schema — the real account's library_track table
+  turned out to hold a single track, and the function correctly returned its one artist,
+  already cached from that same session's runs.
 
 ### 7.10 Re-baseline after the second source — *done, and it mostly did not work*
 
@@ -1435,9 +1444,45 @@ its own before/after.
 test: reverting it entirely left all 652 green. `test_collapse_unions_the_sources_of_a_native_and_a_graph_copy`
 and `test_collapse_still_picks_the_representative_on_pre_union_score` both fail without it.
 
-**Still open:** the Spotify prediction above, and whether §7.12's same-artist defect narrows now
-that corroboration counts correctly — re-baseline that number before proposing anything further
-for it.
+**Spotify prediction checked, 2026-09-16.** Live, `--similarity --repeat`, real account:
+`native_ceiling` measures **0/seed**, and every case's "vs native" arm returns `n=0`. That is
+not a rate-limit fluke (retries logged, all ten slots still filled) but §3's "What Spotify
+actually revoked" table holding: `/recommendations` and `artist_related_artists`/`artist_top_tracks` are 403/404
+for this app, so Spotify has no native-keyed candidate at all. `_collapse_variants` can therefore
+never form a cluster mixing a native-keyed and a graph-keyed copy of the same song on this
+backend — §7.16's fix is provably a no-op there, not just empirically small, confirming the
+prediction by construction rather than by measurement noise. (Overall corroboration measured
+0.47 this run, far above §7.10/§7.12's 0.13–0.22, but that is the cumulative effect of §7.12's
+second graph source, §7.13's last.fm source and §7.15's tie-break — none of which is §7.16 — so
+it is not evidence against the no-op claim above.)
+
+**Same-artist re-baseline, YouTube, 2026-09-16** (`--similarity --repeat`, same account, warm
+cache, ceiling now 9/seed with `graph_similar_lfm` counted): headline corroboration is **0.95**,
+clear of the 0.87 noise floor, and the corroboration delta (graph vs native) is +0.43, the
+highest recorded yet. But the two same-artist pairs moved in **opposite directions**, so "the
+defect narrows" is not the honest summary:
+
+| pair | §7.12 (pre-7.16) | run 1 | run 2 |
+| --- | --- | --- | --- |
+| Channa Mereya vs Kesariya (Arijit Singh) | 30–40% | **70%** | **60%** — worse |
+| Excuses vs Brown Munde (AP Dhillon) | 30–50% | **20%** | **20%** — better |
+
+Arijit regressed rather than narrowed; AP Dhillon improved. Two independent warm-cache runs
+(`--similarity --repeat` and a plain `--similarity` immediately after, both live, same account)
+give a rough per-pair noise floor — Arijit 60–70% (±10pp), AP Dhillon a flat 20% both times — so
+neither movement is a single run's variance: Arijit's regression from the §7.12-era 30–40% is
+real, and so is AP Dhillon's improvement.
+
+The likely mechanism is the fix itself: both songs' pools now carry unioned, higher-scoring
+native+graph candidates, and Arijit's neighbourhood is thin enough (§7.13: last.fm returns 0 for
+both titles under every credit tried) that the well-corroborated tracks surviving to the top ten
+are disproportionately his own other songs — more agreement concentrating on the same small
+shared set, not less. AP Dhillon's wider last.fm coverage (50 neighbours per seed, §7.13)
+apparently gives the union more room to diverge instead. Not verified further here — the two-run
+check above bounds the variance but doesn't confirm the mechanism, and a fix for a source-density
+problem is a different shape of work than §7.16 was. Left for whoever picks up the same-artist
+defect next: it did not uniformly close, and a source-count fix (§7.13's original angle) will not
+help Arijit specifically while last.fm stays empty for those two titles.
 
 ---
 
@@ -1564,3 +1609,52 @@ with zero engine changes. Two design choices did the real work: the checker read
 agent replans on would have measured nothing. The one defect was in the harness (an MCP result
 must go back as content blocks), and the agent met it by refusing to invent songs and reporting
 the engine as broken.
+
+**2026-09-16 — the same-artist defect re-baselined, and it split rather than closed.** §7.16's
+last open question answered: whether §7.12's same-artist-seed overlap narrowed once corroboration
+counted correctly across the native/graph families. It did not, uniformly — the two probed pairs
+moved in opposite directions. Channa Mereya vs Kesariya (Arijit Singh) went 30–40% → 60–70%,
+worse; Excuses vs Brown Munde (AP Dhillon) went 30–50% → 20%, better. Two independent live runs
+bound the variance (Arijit 60–70%, AP Dhillon a flat 20% both times), so neither movement is one
+run's noise. Overall corroboration is now 0.95, clear of an 0.87 floor. Read together with §7.13's
+finding that last.fm returns 0 neighbours for both Arijit titles under every credit tried: the
+mechanism is likely that unioning evidence concentrates agreement on whichever songs a thin
+source set keeps returning, which for Arijit is his own other tracks. Also dropped §7.6
+(respecting native YouTube dislikes) from the roadmap without building it.
+
+**2026-09-16 — the Spotify prediction, confirmed by construction.** §7.16's last open item:
+whether the native/graph corroboration fix affects Spotify. Live, `--similarity --repeat`, real
+account: `native_ceiling` measures 0/seed for every case, matching §3's revoked-capability table
+(`/recommendations` and the artist-relation endpoints are 403/404 for this app) — Spotify never
+produces a native-keyed candidate at all, so `_collapse_variants` can never cluster one with a
+graph-keyed copy there. The fix is a structural no-op on Spotify, not an empirically small effect.
+Overall corroboration measured 0.47 this run (up from §7.10/§7.12's 0.13–0.22), but that is the
+accumulated effect of §7.12's second graph source, §7.13's last.fm source and §7.15's tie-break,
+none of which is §7.16 — it does not contradict the no-op finding. Same-artist overlap there also
+improved (Arijit 90% → 80%, AP Dhillon 80–90% → 70%), for the same accumulated reasons.
+
+**2026-09-16 — two of §7.9's smaller items.** `ytmusicapi` moved from a hard dependency to a
+`youtube` extra in `pyproject.toml`, confirmed first rather than assumed: every `import
+ytmusicapi` across the repo traced back to offline scripts and `lyrics.py`/`atlas.py`, never to
+`server.py`, `signals.py` or `provider.py`; `dev` keeps its own copy since two test modules import
+`ytmusicapi.exceptions` directly. All 656 tests still pass on a plain `pip install -e .`.
+Separately, `scripts/maintain.py` gained a 5th stage that pre-resolves library artists'
+MusicBrainz identity on a schedule instead of on a user's first cold request for that artist — the
+1.2s throttle is ten times Deezer's, which is why this one and not that one. 5 new tests cover the
+new selection query (`_pending_brainz_artists`); the network call it wraps (`brainz.resolve_artist`)
+was already exercised live earlier this session.
+
+**2026-09-16 — §7.9's last item: `server.py` gets a `tools/` layer.** All 9 `@mcp.tool()` bodies
+moved out into `tools/{similarity,library,mood,feedback,status}.py`; `server.py` keeps
+registration, the docstrings that are each tool's user-facing contract, and the shared
+infrastructure (`_client`, `_store`, `_graph`, `_library_video_ids`, the `signals.py`
+re-exports) every tool body calls into. The design choice that mattered: `tools/*.py` do
+`import server` and read `server.X` fresh on every call rather than `from server import X`, so
+the existing `monkeypatch.setattr(server, "_client", ...)`-style tests keep passing from the
+outside with zero changes — of ~661 tests, exactly one needed updating
+(`test_server_takes_both_budgets_from_one_place`), because it used `inspect.getsource` to assert
+the *implementation* calls `resolve_candidates`, and the implementation is what moved; pointed it
+at `tools.similarity` instead, plus a new assertion that the `server.py` wrapper still delegates.
+`server.py`: 1,193 → 899 lines. Verified against the real account after the move (`index_status`,
+a live `recommend_from_song` call), not only the unit suite, since this is the actual server this
+session's own MCP tools run against. §7.9 is now fully closed.

@@ -14,7 +14,7 @@ PLAN.md §2.1, "The provider seam", for the design notes.
 import functools
 import json
 import os
-import random
+import random  # not called here directly; kept so tests can patch server.random.sample
 import time
 from pathlib import Path
 from typing import Any
@@ -574,54 +574,18 @@ def recommend_from_song(
     always honoured, but call refresh_library() after adding songs to a
     playlist by other means.
     """
-    yt = _client()
-    if not video_id:
-        if not song:
-            raise RuntimeError("Provide either video_id or song (optionally with artist).")
-        video_id = _resolve_song_video_id(yt, song, artist)
-        if video_id is None:
-            desc = f"{song!r} by {artist!r}" if artist else repr(song)
-            raise RuntimeError(f"No song found matching {desc}.")
+    from tools import similarity
 
-    seed_artist_names: list[str] = []
-    graph_conn = _graph()
-    seed_meta = {"title": song, "artists": [artist] if artist else []} if song else None
-    candidates = _gather_seed_candidates(
-        yt, video_id, seed_artist_names, graph_conn=graph_conn, seed_meta=seed_meta
-    )
-    merged = _merge_and_score([candidates])
-    if same_artist_only:
-        merged = _filter_same_artist(merged, seed_artist_names or ([artist] if artist else []))
-
-    exclude = _library_video_ids(yt) | _recently_served()
-    filtering = bool(language or exclude_languages or bpm or bpm_min or bpm_max or match_seed_tempo)
-    # The pool stays deep for native candidates while the searching stays
-    # bounded -- both numbers together, from one place. See resolve_budgets.
-    pool, searches = resolve_budgets(limit, filtering=filtering)
-    ranked, variants_collapsed = _finalize(
-        merged, exclude, pool, exclude_index=_library_exclusion_index() if graph_conn else None
-    )
-    ranked, unresolved = resolve_candidates(yt, ranked, pool, exclude, max_resolve=searches)
-
-    result = _apply_result_filters(
-        ranked, seed_video_id=video_id, seed_title=song, seed_artist=artist,
-        limit=limit, language=language, exclude_languages=exclude_languages,
+    return similarity.recommend_from_song(
+        video_id=video_id, song=song, artist=artist, limit=limit,
+        same_artist_only=same_artist_only, language=language,
+        exclude_languages=exclude_languages,
         allow_unlabelled_language=allow_unlabelled_language,
-        bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max, match_seed_tempo=match_seed_tempo,
-        expand_across_language=expand_across_language, max_per_artist=max_per_artist,
-        exclude=exclude,
+        bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
+        match_seed_tempo=match_seed_tempo,
+        expand_across_language=expand_across_language,
+        max_per_artist=max_per_artist,
     )
-    if variants_collapsed:
-        result["notes"].insert(
-            0, f"Collapsed {variants_collapsed} remix/feature variant(s) down to one per song."
-        )
-    if unresolved:
-        result["notes"].append(
-            f"Dropped {unresolved} music-graph candidate(s) that couldn't be matched to a "
-            f"song on {PROVIDER} (or turned out to be in your library after matching)."
-        )
-    _mark_served(result["songs"], "recommend_from_song")
-    return result
 
 
 @mcp.tool()
@@ -639,42 +603,9 @@ def recommend_from_playlist(playlist_id: str, limit: int = 20, seed_sample_size:
     always honoured, but call refresh_library() after adding songs to a
     playlist by other means.
     """
-    yt = _client()
-    playlist = yt.get_playlist(playlist_id, limit=None)
-    tracks = [t for t in playlist.get("tracks", []) if t.get("videoId")]
-    if not tracks:
-        # Was a bare `return []`, which is indistinguishable from "there is
-        # nothing new to recommend from this playlist" -- two very different
-        # things. Measured on Spotify, where the post-Nov-2024 restriction 403s
-        # every playlist read: this returned an empty list in 1.5s and said
-        # nothing about why. Its sibling recommend_from_playlist_for_mood
-        # already raised here; matching it rather than inventing a second
-        # answer to the same question.
-        raise RuntimeError(f"Playlist {playlist_id!r} has no playable tracks to read.")
+    from tools import similarity
 
-    sample = tracks if len(tracks) <= seed_sample_size else random.sample(tracks, seed_sample_size)
-
-    # skip_failures=False keeps this tool's existing contract: a seed that
-    # fails here surfaces as a clear error via handle_errors rather than
-    # quietly shrinking the candidate pool.
-    graph_conn = _graph()
-    per_seed = gather_seeds(
-        yt,
-        [t["videoId"] for t in sample],
-        skip_failures=False,
-        graph_conn=graph_conn,
-        seed_meta={t["videoId"]: _norm_track(t) for t in sample},
-    )
-    merged = _merge_and_score(per_seed)
-
-    exclude = _library_video_ids(yt) | _recently_served() | {t["videoId"] for t in tracks}
-    pool, searches = resolve_budgets(limit)
-    songs, _ = _finalize(
-        merged, exclude, pool, exclude_index=_library_exclusion_index() if graph_conn else None
-    )
-    songs, _unresolved = resolve_candidates(yt, songs, limit, exclude, max_resolve=searches)
-    _mark_served(songs, "recommend_from_playlist")
-    return songs
+    return similarity.recommend_from_playlist(playlist_id, limit=limit, seed_sample_size=seed_sample_size)
 
 
 @mcp.tool()
@@ -701,43 +632,9 @@ def songs_by_artist(artist: str, limit: int = 10) -> dict[str, Any]:
     always honoured, but call refresh_library() after adding songs to a
     playlist by other means.
     """
-    yt = _client()
-    resolved = _resolve_artist(yt, artist)
-    if resolved is None or not resolved.get("browseId"):
-        return {"artist": None, "requested": limit, "found": 0, "variants_collapsed": 0, "songs": []}
+    from tools import similarity
 
-    catalog = _artist_song_catalog(yt, resolved["browseId"])
-    exclude = _library_video_ids(yt) | _recently_served()
-
-    songs: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    variants_collapsed = 0
-    for item in catalog:
-        track = _norm_track(item)
-        vid = track["videoId"]
-        if not vid or vid in exclude or vid in seen:
-            continue
-        track_artist = (track.get("artists") or [None])[0]
-        if any(
-            same_song(track["title"], track_artist, s["title"], (s.get("artists") or [None])[0])
-            for s in songs
-        ):
-            seen.add(vid)
-            variants_collapsed += 1
-            continue
-        seen.add(vid)
-        songs.append(track)
-        if len(songs) >= limit:
-            break
-
-    _mark_served(songs, "songs_by_artist")
-    return {
-        "artist": resolved.get("artist"),
-        "requested": limit,
-        "found": len(songs),
-        "variants_collapsed": variants_collapsed,
-        "songs": songs,
-    }
+    return similarity.songs_by_artist(artist, limit=limit)
 
 
 @mcp.tool()
@@ -760,24 +657,9 @@ def refresh_library(video_ids: list[str] | None = None) -> dict[str, Any]:
     `served_ttl_seconds` whether or not it gets saved, so asking again doesn't
     repeat it.
     """
-    added = {v for v in (video_ids or []) if isinstance(v, str) and v}
-    base = {"cache_path": str(CACHE_PATH), "ttl_seconds": CACHE_TTL, "served_ttl_seconds": SERVED_TTL}
+    from tools import library
 
-    if added:
-        cached = _read_cache()
-        if cached is not None:
-            ids, fetched_at = cached
-            merged = ids | added
-            _write_cache(merged, fetched_at=fetched_at)
-            return {**base, "rebuilt": False, "added": len(added - ids), "tracks_excluded": len(merged)}
-
-    # No ids, or no usable cache to add them to: a full build. Ids passed in
-    # are still unioned, in case the service hasn't surfaced the add yet.
-    ids = _library_video_ids(_client(), force_refresh=True)
-    if added - ids:
-        ids |= added
-        _write_cache(ids)
-    return {**base, "rebuilt": True, "added": len(added), "tracks_excluded": len(ids)}
+    return library.refresh_library(video_ids)
 
 
 # --- v2: mood ---------------------------------------------------------------
@@ -864,31 +746,14 @@ def recommend_for_mood(
     worth repeating to the user), `match_quality` (genuine vs. filler counts)
     and `songs`, each with its slot, mood fit and which signals surfaced it.
     """
-    import recommend
-    import store as _s
+    from tools import mood
 
-    _require_mood_support()
-    yt = _client()
-    conn = _store()
-    # Learn from earlier rounds before ranking this one. Local SQL only, and
-    # idempotent, so it's cheap enough to run on every call rather than
-    # needing its own cron.
-    _s.infer_implicit_feedback(conn)
-    exclude = _library_video_ids(yt) | _s.rejected_video_ids(conn) | _recently_served()
-    graph_conn = _graph()
-
-    result = recommend.build(
-        yt, conn, exclude=exclude, feeling=feeling, vector=vector,
-        context=context, arc=arc, limit=limit, genres=genres,
-        language=language, exclude_languages=exclude_languages,
+    return mood.recommend_for_mood(
+        feeling=feeling, vector=vector, context=context, arc=arc, limit=limit,
+        genres=genres, language=language, exclude_languages=exclude_languages,
         allow_unlabelled_language=allow_unlabelled_language,
         bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
-        graph_conn=graph_conn,
-        exclude_index=_library_exclusion_index() if graph_conn else None,
     )
-    _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
-    _mark_served(result["songs"], "recommend_for_mood")
-    return result
 
 
 @mcp.tool()
@@ -938,71 +803,14 @@ def recommend_from_playlist_for_mood(
     playlist-management tool, then call refresh_library() so the new tracks are
     excluded from later recommendations.
     """
-    import recommend
-    import store as _s
+    from tools import mood
 
-    _require_mood_support()
-    yt = _client()
-    conn = _store()
-    _s.infer_implicit_feedback(conn)  # same reasoning as recommend_for_mood
-
-    playlist = yt.get_playlist(playlist_id, limit=None)
-    tracks = [t for t in playlist.get("tracks", []) if t.get("videoId")]
-    if not tracks:
-        raise RuntimeError(f"Playlist {playlist_id!r} has no playable tracks to read.")
-
-    resolved = recommend.resolve_target(conn, yt, feeling, vector, context)
-    picked = recommend.pick_seeds_from_playlist(
-        conn, tracks, resolved["target"], cap=seed_cap or recommend.PLAYLIST_SEED_CAP
-    )
-    if not picked["seeds"]:
-        raise RuntimeError(
-            f"No track in this playlist fits that mood well enough to seed from "
-            f"({picked['considered']} considered). Seeding from tracks that don't fit "
-            "would just return the playlist's own mood back. Try recommend_for_mood to "
-            "draw on the whole library instead, or run scripts/label_library.py if these "
-            "tracks are simply unlabelled."
-        )
-
-    exclude = (
-        _library_video_ids(yt)
-        | _s.rejected_video_ids(conn)
-        | _recently_served()
-        | {t["videoId"] for t in tracks}
-    )
-    graph_conn = _graph()
-
-    result = recommend.build(
-        yt, conn, exclude=exclude, feeling=feeling, vector=vector,
-        context=context, arc=arc, limit=limit,
-        language=language, exclude_languages=exclude_languages,
+    return mood.recommend_from_playlist_for_mood(
+        playlist_id, feeling=feeling, vector=vector, context=context, arc=arc,
+        limit=limit, language=language, exclude_languages=exclude_languages,
         allow_unlabelled_language=allow_unlabelled_language,
-        bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max,
-        seeds=picked["seeds"], resolved=resolved,
-        graph_conn=graph_conn,
-        exclude_index=_library_exclusion_index() if graph_conn else None,
+        bpm=bpm, bpm_min=bpm_min, bpm_max=bpm_max, seed_cap=seed_cap,
     )
-    result["seed_report"] = {
-        "playlist_id": playlist_id,
-        "considered": picked["considered"],
-        "genuine": picked["genuine"],
-        "seeded_from": len(picked["seeds"]),
-        "capped": picked["capped"],
-    }
-    if picked["capped"]:
-        result["notes"].append(
-            f"{picked['genuine']} of {picked['considered']} playlist tracks fit this mood; "
-            f"seeded from the best {len(picked['seeds'])} of them."
-        )
-    else:
-        result["notes"].append(
-            f"Seeded from {len(picked['seeds'])} of {picked['considered']} playlist tracks "
-            "-- the ones that genuinely fit this mood."
-        )
-
-    _s.log_recommendations(conn, result["songs"], result["target"], feeling, arc)
-    _mark_served(result["songs"], "recommend_from_playlist_for_mood")
-    return result
 
 
 @mcp.tool()
@@ -1019,15 +827,9 @@ def read_my_mood() -> dict[str, Any]:
     that lifts?" is the point of this tool; asserting "you are sad" is not.
     Mood inference is often wrong, so offer it as a read the user can correct.
     """
-    import moodspace
-    import sense
+    from tools import mood
 
-    _require_mood_support()
-    read = sense.read_mood(_store(), _client())
-    return {
-        **read,
-        "described": moodspace.describe(read["vector"]) if read["vector"] else None,
-    }
+    return mood.read_my_mood()
 
 
 @mcp.tool()
@@ -1039,33 +841,9 @@ def explain_recommendation(video_id: str) -> dict[str, Any]:
     lyrics, YouTube mood-playlist membership, or the artist's own average), the
     named moods it sits closest to, and the mood it was last served against.
     """
-    import label
-    import moodspace
-    import store as _s
+    from tools import feedback
 
-    conn = _store()
-    track = _s.get_track(conn, video_id) or {}
-    entry = label.resolve(conn, video_id)
-
-    served = conn.execute(
-        "SELECT served_at, feeling, arc, slot, valence, energy, tension, depth "
-        "FROM recommendation WHERE video_id = ? ORDER BY served_at DESC LIMIT 1",
-        (video_id,),
-    ).fetchone()
-
-    return {
-        "videoId": video_id,
-        "title": track.get("title"),
-        "artists": track.get("artists"),
-        "mood": entry["vector"] if entry else None,
-        "mood_source": entry["source"] if entry else None,
-        "confidence": entry["confidence"] if entry else None,
-        "described": moodspace.describe(entry["vector"]) if entry else None,
-        "closest_moods": [name for name, _ in moodspace.nearest_anchors(entry["vector"], 3)] if entry else [],
-        "atlas_playlists": _s.atlas_moods_for(conn, video_id)[:8],
-        "genre": label.genre_prior(conn, video_id),
-        "last_served_against": dict(served) if served else None,
-    }
+    return feedback.explain_recommendation(video_id)
 
 
 @mcp.tool()
@@ -1079,14 +857,9 @@ def record_feedback(video_id: str, reaction: str) -> dict[str, Any]:
     read was off, which is a different failure from simply not liking it.
     Anything marked skipped or wrong_mood is never recommended again.
     """
-    import store as _s
+    from tools import feedback
 
-    allowed = {"loved", "saved", "skipped", "wrong_mood"}
-    if reaction not in allowed:
-        raise RuntimeError(f"reaction must be one of: {', '.join(sorted(allowed))}.")
-
-    _s.put_feedback(_store(), video_id, reaction)
-    return {"videoId": video_id, "reaction": reaction, "recorded": True}
+    return feedback.record_feedback(video_id, reaction)
 
 
 @mcp.tool()
@@ -1099,94 +872,27 @@ def index_status() -> dict[str, Any]:
     configured. Low coverage means recommendations are ranking mostly on signal
     agreement rather than on mood -- worth saying out loud.
     """
-    import judge
-    import label
-    import store as _s
+    from tools import status
 
-    conn = _store()
-    _s.infer_implicit_feedback(conn)
-    return {
-        # Name the backend and its store: these numbers describe one
-        # provider's index, and an empty one on a fresh backend is a real
-        # answer rather than a bug.
-        "provider": PROVIDER,
-        "store": str(_s.DB_PATH),
-        "mood_supported": PROVIDER in MOOD_PROVIDERS,
-        "atlas": _s.atlas_stats(conn),
-        "library": label.library_coverage(conn),
-        "feedback": _s.feedback_stats(conn),
-        "graph": _graph_status(),
-        "maintenance": _maintenance_report(conn),
-        "llm_labelling": {
-            "available": judge.available(),
-            "model": judge.MODEL,
-            "hint": None if judge.available() else "Install with: pip install -e '.[llm]' and run 'ant auth login'.",
-        },
-    }
+    return status.index_status()
 
 
 def _maintenance_report(conn: Any) -> dict[str, Any]:
-    """Staleness and trend since the last `scripts/maintain.py` run (PLAN.md 7.4).
+    """Thin re-export of tools.status's implementation, kept here because
+    tests and index_status's own docstring already point at `server.py` as
+    where every tool's status/diagnostics surface lives; see tools/status.py
+    for the actual body (PLAN.md 7.9)."""
+    from tools import status
 
-    A total on its own doesn't say whether the index is still growing or has
-    stalled since crawling stopped mattering to whoever set this up. Diffing
-    the live numbers against the snapshot the last maintenance run took makes
-    that visible instead of silent, which is the whole point of §7.4's
-    "staleness and trend rather than only totals".
-    """
-    import store as _s
-
-    status = _s.maintenance_status(conn)
-    if status["last_run_at"] is None:
-        return {"last_run_at": None, "hint": "scripts/maintain.py has never run. See PLAN.md 7.4."}
-
-    graph_coverage = None
-    if GRAPH_ENABLED:
-        try:
-            import graph_atlas
-
-            graph_coverage = graph_atlas.coverage(_graph())
-        except Exception:  # noqa: BLE001 - a status report must never fail the call
-            graph_coverage = None
-
-    current = _s.coverage_snapshot(conn, graph_coverage=graph_coverage)
-    previous = status["snapshot"] or {}
-    return {
-        "last_run_at": status["last_run_at"],
-        "stale_hours": status["stale_hours"],
-        "trend_since_last_run": {k: round(v - previous[k], 4) for k, v in current.items() if k in previous},
-        "last_run_stages": status["last_stages"],
-    }
+    return status._maintenance_report(conn)
 
 
 def _graph_status() -> dict[str, Any]:
-    """What the music graph holds, for index_status.
+    """Thin re-export of tools.status's implementation; see tools/status.py
+    for the actual body (PLAN.md 7.9)."""
+    from tools import status
 
-    Reported alongside the mood index for the same reason that exists: on a
-    backend whose native signals are gone, the graph is where every
-    recommendation now comes from, so an empty graph is the difference between
-    good results and none. Its capabilities are named too, because "this
-    backend supplies no native signals" is the single most useful thing to
-    know when results look thin.
-    """
-    if not GRAPH_ENABLED:
-        return {"enabled": False}
-
-    import graph_atlas
-    import graph_store
-
-    try:
-        conn = _graph()
-        caps = sorted(provider_module.capabilities_of(_client()))
-        return {
-            "enabled": True,
-            "path": str(graph_store.DB_PATH),
-            "native_signals": caps or None,
-            "cache": graph_store.stats(conn),
-            "atlas": graph_atlas.coverage(conn),
-        }
-    except Exception as e:  # noqa: BLE001 - a status report must never fail the call
-        return {"enabled": True, "error": f"{type(e).__name__}: {e}"}
+    return status._graph_status()
 
 
 if __name__ == "__main__":

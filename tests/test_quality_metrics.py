@@ -182,13 +182,22 @@ def test_the_harness_does_not_re_derive_the_resolve_budgets():
 
 
 def test_server_takes_both_budgets_from_one_place():
-    """The same guarantee on the side that actually ships."""
+    """The same guarantee on the side that actually ships.
+
+    The orchestration itself lives in tools/similarity.py (PLAN.md 7.9); the
+    two functions here are server.py's thin @mcp.tool() wrappers, which must
+    still delegate to it rather than reimplementing anything.
+    """
     import inspect
 
     import server
+    from tools import similarity
 
     for name in ("recommend_from_song", "recommend_from_playlist"):
-        source = inspect.getsource(getattr(server, name))
+        wrapper_source = inspect.getsource(getattr(server, name))
+        assert f"similarity.{name}" in wrapper_source, f"{name} no longer delegates to tools.similarity"
+
+        source = inspect.getsource(getattr(similarity, name))
         assert "resolve_candidates" in source, f"{name} no longer resolves; update this test"
         assert "resolve_budgets" in source, f"{name} must use signals.resolve_budgets"
         assert "* 12" not in source, f"{name} re-derives the filter pool"

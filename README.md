@@ -567,7 +567,7 @@ For other MCP clients (Claude Desktop, etc.), point them at the same command and
 
 If a backend's `*-mcp` auth expires or rotates, tool calls fail with a clear message pointing at re-authenticating *there* — re-com has nothing of its own to re-run.
 
-**Offline maintenance scripts still authenticate directly.** `scripts/build_atlas.py`, `scripts/label_library.py`, `scripts/build_genres.py`, `scripts/build_tempo.py`, `scripts/snapshot_history.py`, and `scripts/quality_check.py` are indexing/labelling jobs you run yourself from the command line, not part of the live tool-call path — they still use `ytmusicapi` directly and need their own `headers_auth.json` (see `scripts/setup_auth_from_file.py` / `scripts/setup_auth.py`, and `RECOM_AUTH_PATH`). That's a separate, unrelated credential from `ytmusic-mcp`'s.
+**Offline maintenance scripts still authenticate directly.** `scripts/build_atlas.py`, `scripts/label_library.py`, `scripts/build_genres.py`, `scripts/build_tempo.py`, `scripts/snapshot_history.py`, and `scripts/quality_check.py` are indexing/labelling jobs you run yourself from the command line, not part of the live tool-call path — they still use `ytmusicapi` directly and need their own `headers_auth.json` (see `scripts/setup_auth_from_file.py` / `scripts/setup_auth.py`, and `RECOM_AUTH_PATH`). That's a separate, unrelated credential from `ytmusic-mcp`'s. `ytmusicapi` itself is an optional dependency (`pip install -e ".[youtube]"`) — the live path never imports it, so a Spotify-only install doesn't need a YouTube Music client it will never call.
 
 ## Testing
 
