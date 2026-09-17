@@ -632,6 +632,31 @@ def build(
         seeds = pick_seeds(conn, target, genres=genres)
     notes = list(resolved.get("evidence", []))
 
+    # Seeds come from the library, so no library means no seeds means no
+    # candidates -- which the shortfall note at the bottom would report as
+    # "No candidates survived the library exclusion", pointing at the filter
+    # instead of the missing input. Say which one it actually is, here, while
+    # the distinction is still knowable.
+    if not seeds:
+        library_size = len(store.library_video_ids(conn))
+        if library_size == 0:
+            notes.append(
+                "Your library is empty in re-com's index, so there are no seeds to "
+                "search from. Run refresh_library (or scripts/maintain.py) to sync it."
+            )
+        elif library_size < store.SHRINK_GUARD_MIN_PREVIOUS:
+            notes.append(
+                f"Only {library_size} track(s) are indexed from your library, which is "
+                "too few to seed a mood. This usually means the last sync failed -- "
+                "run refresh_library to rebuild it."
+            )
+        else:
+            notes.append(
+                f"None of the {library_size} indexed library tracks carry a mood close "
+                "enough to this one to seed from. Mood coverage, not the request, is "
+                "the limit here -- index_status shows how much of the library is labelled."
+            )
+
     # The graph, threaded through exactly as the v1 similarity tools do. v6
     # wired it into `recommend_from_song`/`recommend_from_playlist` and not
     # into this path, which was invisible on YouTube -- native signals fill the
@@ -704,7 +729,11 @@ def build(
             "target_origin": resolved["origin"],
             "described": moodspace.describe(target),
             "arc": arc, "seeds": seeds,
-            "notes": notes + ["No candidates survived the library exclusion."],
+            # Only blame the exclusion when there was something for it to
+            # exclude. With no seeds the pool was never populated in the first
+            # place, and the note added above already says why -- appending this
+            # one too would restate the wrong cause next to the right one.
+            "notes": notes + (["No candidates survived the library exclusion."] if seeds else []),
             "filters": {"language": {"applied": False}, "tempo": {"applied": False}},
             "match_quality": {"genuine": 0, "requested": limit, "fluff_cap": math.ceil(limit * FLUFF_CAP_RATIO), "fluff_used": 0},
             "songs": [],

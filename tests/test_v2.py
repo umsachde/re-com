@@ -1124,7 +1124,7 @@ def test_sync_library_records_liked_and_playlist_membership(db):
         listing=[{"playlistId": "PL1", "title": "C - Punjabi"}],
     )
     result = label.sync_library(db, yt)
-    assert result == {"playlists": 1, "rows": 2, "unique_tracks": 2}
+    assert result == {"playlists": 1, "failed_playlists": 0, "rows": 2, "unique_tracks": 2}
     assert label.genre_prior(db, "b") == "Punjabi"
     assert store.get_track(db, "a")["artists"] == "X"
 

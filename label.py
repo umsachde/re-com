@@ -235,7 +235,7 @@ def sync_library(conn: Any, yt: Any) -> dict[str, int]:
             entries.append((track["videoId"], "Liked Music", True))
             tracks.append(track)
 
-    playlists = 0
+    playlists, failed = 0, 0
     for playlist in yt.get_library_playlists(limit=None):
         playlist_id, title = playlist.get("playlistId"), playlist.get("title")
         if not playlist_id or playlist_id == "LM" or not title:
@@ -243,6 +243,11 @@ def sync_library(conn: Any, yt: Any) -> dict[str, int]:
         try:
             full = yt.get_playlist(playlist_id, limit=None)
         except Exception:  # noqa: BLE001 - one bad playlist must not stop the sync
+            # Counted, not just skipped. Swallowing these made a total auth
+            # failure -- every playlist raising -- report the same "ok" as a
+            # clean run, and then hand the near-empty result to a destructive
+            # replace. The count is what lets the caller tell the difference.
+            failed += 1
             continue
         playlists += 1
         for track in full.get("tracks", []):
@@ -252,7 +257,12 @@ def sync_library(conn: Any, yt: Any) -> dict[str, int]:
 
     store.upsert_tracks(conn, tracks)
     rows = store.sync_library(conn, entries)
-    return {"playlists": playlists, "rows": rows, "unique_tracks": len(store.library_video_ids(conn))}
+    return {
+        "playlists": playlists,
+        "failed_playlists": failed,
+        "rows": rows,
+        "unique_tracks": len(store.library_video_ids(conn)),
+    }
 
 
 def library_coverage_by_language(conn: Any) -> dict[str, dict[str, Any]]:

@@ -471,9 +471,65 @@ def get_lyrics(conn: sqlite3.Connection, video_id: str) -> dict[str, Any] | None
 # --- library ----------------------------------------------------------------
 
 
-def sync_library(conn: sqlite3.Connection, entries: Iterable[tuple[str, str, bool]]) -> int:
-    """Replace the recorded library with (video_id, playlist_title, is_liked) rows."""
+# A replace that keeps this fraction or more of the previous library is a
+# normal sync; songs do get unliked and playlists do get deleted. Below it,
+# a degraded fetch is far likelier than a real deletion of that scale.
+SHRINK_FLOOR_RATIO = 0.5
+
+# Libraries at or below this size are too small for a ratio to mean anything --
+# 2 tracks down to 1 is not evidence of anything, and the guard must not make
+# small or fresh libraries un-syncable.
+SHRINK_GUARD_MIN_PREVIOUS = 25
+
+
+class LibraryShrankError(RuntimeError):
+    """A sync would have destroyed most of a populated library.
+
+    Raised instead of performing the replace, because the replace is not
+    recoverable: `library_track` is the only record of what the user has, and
+    the mood path reads nothing else. See sync_library.
+    """
+
+    def __init__(self, previous: int, incoming: int) -> None:
+        self.previous, self.incoming = previous, incoming
+        super().__init__(
+            f"Refusing to replace a {previous}-track library with {incoming} "
+            f"track(s): that is a {1 - incoming / previous:.0%} loss, which is "
+            "far more likely a failed fetch than a real deletion. Pass "
+            "force=True if the library really did shrink this much."
+        )
+
+
+def sync_library(
+    conn: sqlite3.Connection,
+    entries: Iterable[tuple[str, str, bool]],
+    force: bool = False,
+) -> int:
+    """Replace the recorded library with (video_id, playlist_title, is_liked) rows.
+
+    The replace is destructive by design -- an unliked song has to actually
+    leave -- and that is why it is guarded. A partial fetch is indistinguishable
+    here from a real deletion: both arrive as "fewer entries than last time".
+    So a catastrophic shrink is refused rather than applied, because the two
+    failure directions are not symmetric. Wrongly keeping a stale library costs
+    one stale recommendation; wrongly deleting it silently zeroes every mood
+    result, and `library_track` is the only copy.
+
+    This is not hypothetical. A run on 2026-09-16 replaced a 1,783-track library
+    with a single malformed row (`video_id='b'`), which left the atlas intact and
+    `index_status` healthy-looking while every `recommend_for_mood` call returned
+    zero candidates and blamed "the library exclusion". The guard is here rather
+    than in the callers so that no caller -- a degraded API, a stubbed provider,
+    a harness pointed at the live store -- can reach the DELETE with bad data.
+    """
     rows = [(v, p, int(bool(liked)), time.time()) for v, p, liked in entries if v and p]
+    incoming = len({r[0] for r in rows})
+
+    if not force:
+        previous = len(library_video_ids(conn))
+        if previous >= SHRINK_GUARD_MIN_PREVIOUS and incoming < previous * SHRINK_FLOOR_RATIO:
+            raise LibraryShrankError(previous, incoming)
+
     with conn:
         conn.execute("DELETE FROM library_track")
         if rows:
