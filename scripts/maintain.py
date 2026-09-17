@@ -18,6 +18,15 @@ Stages, cheapest and most load-bearing first:
   3. tempo backfill against Deezer                            (provider-neutral)
   4. the shared graph atlas: crawl, materialize, propagate    (provider-neutral,
      shared across every backend)
+  5. MusicBrainz artist-identity warm-up for library artists  (provider-neutral,
+     shares stage 4's gate -- see PLAN.md 7.9)
+
+Stage 5 exists because MusicBrainz throttles at 1.2s/request (`brainz.MB_THROTTLE`)
+against Deezer's 0.12s, ten times worse, and `graph.neighbours` resolves a seed's
+artist identity there on a cold cache during a live recommendation. Pre-resolving
+every library artist here means that cost is paid on a schedule instead of a
+user's first request for that artist -- the result (`brainz_artist` row) is the
+same permanent cache either way.
 
 Each stage is independent and caught on its own: one failing (a 503, a
 missing token, no auth file) must not stop the ones after it, the same
@@ -39,6 +48,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -58,6 +68,7 @@ DEFAULT_ATLAS_LIMIT = 60
 DEFAULT_GENRE_PLAYLISTS = 12
 DEFAULT_TEMPO_LIMIT = 400
 DEFAULT_GRAPH_LIMIT = 40
+DEFAULT_BRAINZ_LIMIT = 40
 
 
 def _stage(fn) -> dict:
@@ -81,6 +92,26 @@ def _youtube_auth_available() -> Path | None:
     return auth if auth.exists() else None
 
 
+def _pending_brainz_artists(conn: Any, graph_conn: Any, limit: int | None) -> list[str]:
+    """Library artists with no `brainz_artist` row yet, bounded.
+
+    Filtered here rather than left to `brainz.resolve_artist`'s own cache check
+    so a bounded run's limit counts artists actually worth a throttled request,
+    not ones it would immediately skip.
+    """
+    library_artists = {
+        label.primary_artist(row["artists"])
+        for row in conn.execute(
+            "SELECT DISTINCT t.artists FROM track t JOIN library_track l USING (video_id) "
+            "WHERE t.artists IS NOT NULL"
+        )
+    }
+    library_artists.discard(None)
+    cached = {row["artist_key"] for row in graph_conn.execute("SELECT artist_key FROM brainz_artist")}
+    pending = sorted(library_artists - cached)
+    return pending[:limit] if limit is not None else pending
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--full", action="store_true", help="no per-stage limits (a cold install's first run)")
@@ -96,10 +127,11 @@ def main() -> int:
     atlas_limit = None if args.full else DEFAULT_ATLAS_LIMIT
     tempo_limit = None if args.full else DEFAULT_TEMPO_LIMIT
     graph_limit = None if args.full else DEFAULT_GRAPH_LIMIT
+    brainz_limit = None if args.full else DEFAULT_BRAINZ_LIMIT
 
     stages: dict[str, dict] = {}
 
-    print("1/4 library sync + atlas materialize + artist propagation...", flush=True)
+    print("1/5 library sync + atlas materialize + artist propagation...", flush=True)
     # The client is built inside the stage: an unconfigured or dead provider
     # subprocess costs the sync, not the tempo and graph stages that don't need it.
     stages["library_sync"] = _stage(lambda: label.sync_library(conn, server._client()))
@@ -110,7 +142,7 @@ def main() -> int:
 
     auth_path = _youtube_auth_available()
     if server.PROVIDER == "youtube" and auth_path:
-        print("2/4 YouTube editorial mood atlas + genre pages...", flush=True)
+        print("2/5 YouTube editorial mood atlas + genre pages...", flush=True)
         yt_holder: list = []
 
         def _yt():
@@ -129,10 +161,10 @@ def main() -> int:
             print(f"    {name}: {stages[name]}", flush=True)
     else:
         reason = "provider is not youtube" if server.PROVIDER != "youtube" else "no headers_auth.json (RECOM_AUTH_PATH)"
-        print(f"2/4 skipped ({reason})", flush=True)
+        print(f"2/5 skipped ({reason})", flush=True)
         stages["youtube_atlas"] = {"status": "skipped", "reason": reason}
 
-    print("3/4 tempo backfill...", flush=True)
+    print("3/5 tempo backfill...", flush=True)
 
     def _tempo() -> dict:
         # Filter to never-attempted tracks *before* the limit. Truncating first
@@ -157,7 +189,7 @@ def main() -> int:
 
     graph_coverage = None
     if server.GRAPH_ENABLED:
-        print("4/4 shared graph atlas: crawl, materialize, propagate...", flush=True)
+        print("4/5 shared graph atlas: crawl, materialize, propagate...", flush=True)
         graph_conns: list = []
 
         def _graph_conn():
@@ -182,9 +214,23 @@ def main() -> int:
             graph_coverage = graph_atlas.coverage(_graph_conn())
         except Exception as e:  # noqa: BLE001 - the run's record matters more than the graph numbers
             print(f"    graph coverage unavailable: {type(e).__name__}: {e}", flush=True)
+
+        print("5/5 MusicBrainz artist-identity warm-up...", flush=True)
+
+        def _brainz_warm() -> dict:
+            import brainz  # local: keeps the second graph source optional at import time
+
+            pending = _pending_brainz_artists(conn, _graph_conn(), brainz_limit)
+            resolved = sum(1 for artist in pending if brainz.resolve_artist(_graph_conn(), artist))
+            return {"attempted": len(pending), "resolved": resolved}
+
+        stages["brainz_warm"] = _stage(_brainz_warm)
+        print(f"    brainz_warm: {stages['brainz_warm']}", flush=True)
     else:
-        print("4/4 skipped (graph disabled: RECOM_GRAPH=0)", flush=True)
+        print("4/5 skipped (graph disabled: RECOM_GRAPH=0)", flush=True)
         stages["graph_crawl"] = {"status": "skipped", "reason": "RECOM_GRAPH=0"}
+        print("5/5 skipped (graph disabled: RECOM_GRAPH=0)", flush=True)
+        stages["brainz_warm"] = {"status": "skipped", "reason": "RECOM_GRAPH=0"}
 
     # Captured before recording, not after: `record_maintenance_run` below
     # overwrites the very snapshot this run needs to diff against, so reading
