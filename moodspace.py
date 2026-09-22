@@ -44,11 +44,17 @@ CONFIDENCE_FLOOR = 0.3
 
 _BOUNDS = {"valence": (-1.0, 1.0), "energy": (0.0, 1.0), "tension": (0.0, 1.0), "depth": (0.0, 1.0)}
 
-# Hand-authored positions for YouTube Music's own "Moods & moments" taxonomy.
-# These are the bridge between a free corpus of mood-labelled playlists and the
-# vector space -- a first draft, meant to be tuned against real listening.
+# Hand-authored positions for every mood re-com can place. The first eleven are
+# YouTube Music's own "Moods & moments" taxonomy; the rest exist because that
+# taxonomy has no word for anger (§7.17). Together they are the bridge between a
+# corpus of mood-labelled playlists and the vector space -- a first draft, meant
+# to be tuned against real listening.
 # Seasonal categories (Christmas, Halloween) are deliberately absent: they
 # describe an occasion, not an emotional state, and have no honest position here.
+# An anchor is not free: `relative_fit` subtracts the mean fit across ALL of
+# them, so adding one shifts every other mood's distinctiveness score. Add one
+# to cover a region of the space that retrieval genuinely cannot reach, not to
+# name a feeling that an existing anchor already retrieves well.
 ANCHORS: dict[str, dict[str, float]] = {
     "Sad":       {"valence": -0.70, "energy": 0.25, "tension": 0.35, "depth": 0.85},
     "Chill":     {"valence":  0.25, "energy": 0.25, "tension": 0.15, "depth": 0.35},
@@ -61,10 +67,34 @@ ANCHORS: dict[str, dict[str, float]] = {
     "Workout":   {"valence":  0.35, "energy": 0.95, "tension": 0.70, "depth": 0.20},
     "Party":     {"valence":  0.70, "energy": 0.85, "tension": 0.30, "depth": 0.15},
     "Gaming":    {"valence":  0.10, "energy": 0.75, "tension": 0.65, "depth": 0.15},
+
+    # Beyond YouTube's taxonomy. A label can only ever land ON an anchor --
+    # `from_atlas_counts` blends anchors and `graph_atlas` searches per anchor --
+    # so a target outside the anchors' hull is unreachable no matter how well
+    # `recommend._FEELING_WORDS` describes it. Measured: asking for "break up
+    # angry" resolved its target correctly (tension 0.90) and then returned ten
+    # songs that all carried one identical mid-valence vector at fit 0.698,
+    # because the eleven moods above have nothing with negative valence above
+    # energy 0.25, and nothing with tension above 0.70. These five cover that
+    # half of the space. Each clears the tightest existing separation
+    # (Energize/Party, 0.185) -- see §7.17.
+    "Angry":       {"valence": -0.55, "energy": 0.85, "tension": 0.90, "depth": 0.40},
+    "Anxious":     {"valence": -0.35, "energy": 0.45, "tension": 0.85, "depth": 0.55},
+    "Heartbroken": {"valence": -0.60, "energy": 0.35, "tension": 0.55, "depth": 0.85},
+    "Nostalgic":   {"valence": -0.05, "energy": 0.35, "tension": 0.20, "depth": 0.85},
+    "Lonely":      {"valence": -0.45, "energy": 0.15, "tension": 0.25, "depth": 0.70},
 }
 
-# Moods worth crawling: exactly those we can place in the space.
-CRAWLABLE_MOODS = tuple(ANCHORS)
+# Moods YouTube Music itself files playlists under, and therefore the only ones
+# `atlas.py` can crawl. Deliberately not `tuple(ANCHORS)`: the anchors above now
+# include moods with no editorial category anywhere, which reach the corpus
+# through `graph_atlas`'s free-text playlist search instead (§7.17). Crawling a
+# name YouTube has never heard of is a no-op, so this list staying the taxonomy
+# is what keeps the two paths honest about which evidence they can actually get.
+CRAWLABLE_MOODS = (
+    "Sad", "Chill", "Sleep", "Focus", "Commute", "Feel good",
+    "Romance", "Energize", "Workout", "Party", "Gaming",
+)
 
 
 def clamp(vector: dict[str, float]) -> dict[str, float]:

@@ -65,8 +65,13 @@ AFFINITY_SATURATION = 3
 # for words the anchor names don't cover.
 _FEELING_WORDS: dict[str, str | dict[str, float]] = {
     "sad": "Sad", "down": "Sad", "low": "Sad", "blue": "Sad", "depressed": "Sad",
-    "heartbroken": "Sad", "heartbreak": "Sad", "lonely": "Sad", "grieving": "Sad",
-    "miserable": "Sad", "crying": "Sad", "hurt": "Sad",
+    "grieving": "Sad", "miserable": "Sad", "crying": "Sad",
+    # Not "Sad". A breakup is not settled grief -- it carries tension Sad does
+    # not, and pointing these at the Sad anchor is what made "break up angry"
+    # and "break up sad" retrieve the same ballads (§7.17).
+    "heartbroken": "Heartbroken", "heartbreak": "Heartbroken", "hurt": "Heartbroken",
+    "dumped": "Heartbroken", "breakup": "Heartbroken",
+    "lonely": "Lonely", "alone": "Lonely", "empty": "Lonely",
     "chill": "Chill", "relaxed": "Chill", "mellow": "Chill", "calm": "Chill",
     "laidback": "Chill", "easy": "Chill", "cruising": "Chill",
     "sleepy": "Sleep", "tired": "Sleep", "exhausted": "Sleep", "bedtime": "Sleep",
@@ -82,16 +87,17 @@ _FEELING_WORDS: dict[str, str | dict[str, float]] = {
     "training": "Workout",
     "party": "Party", "partying": "Party", "celebrating": "Party",
     "gaming": "Gaming",
-    "angry": {"valence": -0.45, "energy": 0.85, "tension": 0.9, "depth": 0.45},
-    "furious": {"valence": -0.55, "energy": 0.9, "tension": 0.95, "depth": 0.4},
-    "rage": {"valence": -0.5, "energy": 0.9, "tension": 0.95, "depth": 0.35},
+    # These now name anchors rather than free vectors: a target only retrieves
+    # well if the corpus has tracks labelled near it, and only an anchor ever
+    # gets labelled (§7.17).
+    "angry": "Angry", "mad": "Angry", "furious": "Angry", "rage": "Angry",
+    "raging": "Angry", "pissed": "Angry", "livid": "Angry",
     "frustrated": {"valence": -0.4, "energy": 0.6, "tension": 0.8, "depth": 0.5},
-    "nostalgic": {"valence": -0.05, "energy": 0.35, "tension": 0.2, "depth": 0.85},
+    "nostalgic": "Nostalgic",
     "wistful": {"valence": -0.2, "energy": 0.25, "tension": 0.2, "depth": 0.85},
     "bittersweet": {"valence": -0.15, "energy": 0.35, "tension": 0.25, "depth": 0.8},
-    "anxious": {"valence": -0.4, "energy": 0.5, "tension": 0.85, "depth": 0.6},
-    "stressed": {"valence": -0.35, "energy": 0.55, "tension": 0.85, "depth": 0.45},
-    "overwhelmed": {"valence": -0.45, "energy": 0.45, "tension": 0.8, "depth": 0.6},
+    "anxious": "Anxious", "stressed": "Anxious", "overwhelmed": "Anxious",
+    "panicking": "Anxious",
     "reflective": {"valence": 0.0, "energy": 0.2, "tension": 0.15, "depth": 0.9},
     "introspective": {"valence": -0.1, "energy": 0.2, "tension": 0.2, "depth": 0.9},
     "thoughtful": {"valence": 0.05, "energy": 0.25, "tension": 0.15, "depth": 0.85},
