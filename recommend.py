@@ -642,13 +642,16 @@ def build(
         if library_size == 0:
             notes.append(
                 "Your library is empty in re-com's index, so there are no seeds to "
-                "search from. Run refresh_library (or scripts/maintain.py) to sync it."
+                "search from. Run scripts/label_library.py (or scripts/maintain.py) to "
+                "sync it -- refresh_library only rebuilds the exclusion cache and will "
+                "report success without touching this."
             )
         elif library_size < store.SHRINK_GUARD_MIN_PREVIOUS:
             notes.append(
                 f"Only {library_size} track(s) are indexed from your library, which is "
                 "too few to seed a mood. This usually means the last sync failed -- "
-                "run refresh_library to rebuild it."
+                "run scripts/label_library.py to rebuild it (not refresh_library, which "
+                "only rebuilds the exclusion cache)."
             )
         else:
             notes.append(

@@ -128,7 +128,10 @@ def test_empty_library_is_reported_as_the_cause_not_the_exclusion(db):
     )
 
     joined = " ".join(result["notes"]).lower()
-    assert "refresh_library" in joined
+    # Names the script that actually re-syncs the library. NOT refresh_library:
+    # that rebuilds the exclusion cache only, and reports success while leaving
+    # an empty library empty -- measured against a real damaged store.
+    assert "label_library" in joined
     assert "library exclusion" not in joined
 
 
