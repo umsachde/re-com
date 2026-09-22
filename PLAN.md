@@ -176,7 +176,8 @@ because several of them are the reason a decision went the way it did.
 
 | | Measured |
 | --- | --- |
-| YouTube library with a mood label (full crawl) | **71.3%** — 553 from artist propagation, 480 from playlist membership |
+| YouTube library with a mood label (2026-09-21) | **79.4%** — 1,417 of 1,784: 683 atlas, 560 artist propagation, 174 `graph_atlas` |
+| YouTube library with a mood label (first full crawl) | 71.3% — 553 from artist propagation, 480 from playlist membership |
 | YouTube editorial atlas alone, 60-playlist sample | **4.1%** of liked songs |
 | Spotify library resolved to Deezer | **324 / 333 (97.3%)** |
 | Spotify library with a `graph_atlas` mood | **104 / 333 (31.2%)** |
@@ -961,8 +962,12 @@ mostly the compaction.
 **What v0 does not settle.** Whether the loop is worth its cost against just calling
 `recommend_for_mood` once — the constraints were chosen so one call *cannot* satisfy them, which
 proves the loop works, not that it earns $0.30 and three minutes for a normal request. Also
-untested: Spotify (same reason as §7.16 — no credentials configured here), multi-step session
-state, and the playlist handoff, which stays a by-hand skill.
+untested: Spotify, multi-step session state, and the playlist handoff, which stays a by-hand
+skill. **The Spotify reason expired.** This and §7.16 both deferred work on "no credentials
+configured here"; `SPOTIFY_CLIENT_ID`/`SECRET` are now in the MCP environment and a live
+`recommend_from_song` there returns a full ranked set with `graph_similar_lfm` and
+`graph_related_lb` both firing (audited 2026-09-21). Nothing blocks the Spotify arm of either
+item any more.
 
 **Sequence it after 7.1–7.3.** An agent that replans on bad intermediate results is only as
 good as the tools' honesty about being bad. Build it first and it replans on vibes.
@@ -1400,9 +1405,12 @@ graph families was therefore structurally uncountable on YouTube.
 and counts clusters that mix a native-keyed and a graph-keyed candidate for the same song. Live on
 YouTube, 2026-09-15: **70 of 81 multi-member clusters were mixed** — not a footnote. Corroborated
 share would move 0.611 → 0.826 under the counterfactual (western 0.6 → 0.9, South Asian
-0.62 → 0.767). Spotify could not be checked live in this environment (`spotify-mcp` had no
-credentials configured here); the prediction that it shows near-zero effect, having no native
-signals to fragment against, is still open.
+0.62 → 0.767). Spotify could not be checked live when this was written (`spotify-mcp` had no
+credentials configured then); the prediction was that it shows near-zero effect, having no
+native signals to fragment against. **Since confirmed by construction** — see the 2026-09-16
+entry in §8: `native_ceiling` measures 0/seed on Spotify, so `_collapse_variants` can never
+cluster a native-keyed candidate with a graph-keyed one there, making the fix a structural
+no-op rather than an empirically small effect. Credentials are configured now (§7.7).
 
 **Built.** `_collapse_variants` now unions `sources` and sums `score` across a cluster onto the
 kept variant, instead of discarding the losers' evidence; which variant's title/artist/videoId
@@ -1484,7 +1492,7 @@ problem is a different shape of work than §7.16 was. Left for whoever picks up 
 defect next: it did not uniformly close, and a source-count fix (§7.13's original angle) will not
 help Arijit specifically while last.fm stays empty for those two titles.
 
-### 7.17 The mood space had no word for anger — *done; verified live, re-baselined, no mood regressed*
+### 7.17 The mood space had no word for anger — *the anchors landed; retrieval did not follow. See §7.18*
 
 Found from a user request: build a rage playlist after a breakup. The complaint that started
 it is the cleanest possible statement of the defect — *"break up angry should give me different
@@ -1652,6 +1660,89 @@ metric and not transferable.
   1.00 were the `graph_atlas`-labelled ones (RATM). So the neutral corpus is reading anger more
   honestly than the editorial one here, which inverts `label.SOURCE_PRIORITY`'s assumption for
   this region of the space. Worth measuring before acting on.
+
+### 7.18 The new anchors are reachable as targets and unreachable as results — *open; measured 2026-09-21*
+
+§7.17's two open residuals were audited rather than re-argued, and they turned out to be four
+compounding causes rather than two. The acceptance test is §7.17's own originating complaint,
+run live on YouTube: `feeling="break up angry"` returns AC/DC and Rage Against The Machine
+**alongside Calvin Harris ×2, Alan Walker, Imagine Dragons and Lost Frequencies**. Every rated
+song in that response carries **positive valence** against a target of −0.55, and the response
+reports `match_quality: {genuine: 8}`. So the anchors fixed target resolution and did not fix
+retrieval, which is why §7.17's status line moved.
+
+They compound, so fixing any one alone will measure inside the ±0.014 noise band §7.17 built.
+
+**1. `label._best` ignores confidence entirely.** `label.py:46` ranks on `SOURCE_PRIORITY`
+alone. The top two seeds for that request — "Apologize (feat. OneRepublic)" and "No Excuses" —
+came back at `fit` 1.00 and `seed_score` 1.188, ahead of *Guerrilla Radio* (0.697) and *T.N.T.*
+(0.695). The store says why: track `-qv5dGmn1NU` holds an `artist` label at valence **+0.408,
+confidence 0.550** and a `graph_atlas` label at valence **−0.550, confidence 0.125**, and
+`_best` takes the second because `graph_atlas` outranks `artist` and confidence never
+arbitrates. A single-playlist guess displaces a four-times-better-evidenced average. That is
+the whole mechanism behind a Timbaland ballad seeding a rage playlist.
+
+**2. `graph_atlas` stamps tracks *exactly* on anchors.** 41,524 of 50,336 graph-corpus tracks
+(**82.5%**) sit verbatim on one of the 16 anchor points, because `graph_atlas` searches per
+anchor and writes the anchor's own vector. The four-axis space is, in practice, 16 delta
+functions: large groups tie at `fit` exactly 1.00, so fit cannot order them and the signal
+count decides. `from_atlas_counts` already blends anchors by playlist count; the graph path
+does not, and that asymmetry is the defect.
+
+**3. The editorial atlas cannot reach the region at all — structurally, not for want of a
+crawl.** Of 65,438 `atlas`-labelled tracks, **zero** have valence < −0.2 and tension > 0.6
+(mean valence **+0.387**, mean tension **0.273**). An atlas label is a convex blend of the
+eleven `CRAWLABLE_MOODS`, whose only negative-valence anchor is `Sad` (tension 0.35) and whose
+only high-tension anchors are `Workout` and `Gaming` (both positive valence) — so that corner
+is outside the hull of the corpus, exactly as it was outside the hull of the anchors before
+§7.17. Measured ceiling: **no atlas track can score above 0.756 against `Angry`.** And `atlas`
+outranks `graph_atlas`, the one source that does reach there (7.1% of its corpus). This is
+§7.17's last bullet, now measured: *Killing In The Name* carries `atlas` valence **+0.61**,
+tension **0.36**.
+
+**4. `arc.sequence` multiplies a bounded score by an unbounded one.** `arc.py:112` computes
+`score = fit * base_score`, where `fit` ∈ [0,1] and `base_score` is an agreement *count*, so
+agreement dominates by construction — this is the `signal_score` 6 vs `mood_fit` 0.657 case
+§7.17 recorded, and it is a scale mismatch rather than a weighting preference. It also uses raw
+`moodspace.fit`, **not** `relative_fit`. §2.4's bland-song failure — "Africa" fitting all eleven
+anchors between 0.57 and 0.92 and topping heartbroken, angry, Party *and* Focus — was fixed via
+`seed_score` on the **seed** side (`recommend.py:200,258`) and never on the **output** side. The
+correction exists and does not reach what the user receives.
+
+**The consequence is that `match_quality.genuine` is not measuring mood fit.** `UNRATED_FIT`
+is 0.45, and `fit` normalises against a theoretical max distance of 1.8166 that no real song
+pair approaches, so the bar sits below the measured floor of the data:
+
+| corpus, scored against `Angry` | min | median | max | clears the 0.45 bar |
+| --- | --- | --- | --- | --- |
+| graph (50,336) | 0.375 | 0.540 | 1.000 | **94.1%** |
+| atlas (65,438) | 0.375 | 0.546 | **0.756** | **98.1%** |
+
+`genuine` therefore reads "carries a label", not "matches the mood", and §1's third hard
+requirement counts it as one of the four honesty mechanisms. Note the atlas row's max: cause 3
+is visible in the same table as cause 4.
+
+**Proposed, in this order**, since each later fix is only measurable once the earlier one lands:
+
+1. `label._best` — require a confidence margin before a higher-priority source displaces a
+   lower-priority one with materially better evidence. Not a re-ranking of `SOURCE_PRIORITY`.
+2. `graph_atlas` — blend anchors by playlist count as `from_atlas_counts` does, which breaks
+   the 82.5% degeneracy without touching the corpus.
+3. `arc.sequence` — use the distinctiveness-weighted form and bound the agreement term
+   (`log1p`, or normalise across the pool) so a count cannot swamp a [0,1] fit.
+4. `UNRATED_FIT` — derive it from the measured distribution (median ≈ 0.54) instead of hand-set
+   0.45.
+
+**Read the result on cross-mood overlap, not mean fit** (§3), against §7.17's ±0.014 band. The
+`Workout/hold` vs `angry/mirror` overlap §7.17 left open is the natural acceptance test, and
+the live "break up angry" response above is the qualitative one.
+
+**One decision this leaves to the author rather than settling.** §7.12's same-artist defect has
+now had three sources probed and its mechanism identified (ListenBrainz's listener base; last.fm
+credit splits). §7.12's own text warns against a third emptiness re-probe. It is arguably time to
+move it out of the roadmap and into §4 as a stated limitation, the way §7.6 was dropped outright —
+but reclassifying it is a call about what the project promises, not an audit finding, so it stays
+open here.
 
 ---
 
@@ -1827,3 +1918,40 @@ at `tools.similarity` instead, plus a new assertion that the `server.py` wrapper
 `server.py`: 1,193 → 899 lines. Verified against the real account after the move (`index_status`,
 a live `recommend_from_song` call), not only the unit suite, since this is the actual server this
 session's own MCP tools run against. §7.9 is now fully closed.
+
+**2026-09-21 — a full audit, and the mood path measured from the outside.** No code changed;
+§7.18 is the deliverable. The roadmap had reached 16 of 17 items closed, so the audit asked the
+only question left: does the newest capability work? §7.17's own originating complaint says no —
+`feeling="break up angry"` returns Calvin Harris twice, Alan Walker, Imagine Dragons and Lost
+Frequencies, every rated song at positive valence against a −0.55 target, reported as
+`genuine: 8`. §7.17's two recorded residuals turned out to be four compounding causes, three of
+them newly measured: `label._best` ranks on source priority and never on confidence, so a
+0.125-confidence single-playlist stamp displaces a 0.550-confidence artist average (that is both
+top seeds of the angry request); `graph_atlas` writes the anchor's own vector rather than
+blending, so 82.5% of the graph corpus sits on 16 discrete points and `fit` ties en masse; and
+the editorial atlas holds **zero** of 65,438 tracks at valence < −0.2 with tension > 0.6, which
+is a property of the eleven-anchor hull rather than of the crawl, with a hard ceiling of 0.756
+against `Angry`. The fourth was already known and is now located: `arc.sequence` multiplies a
+bounded fit by an unbounded agreement count and uses raw `fit` where the seed path uses
+`seed_score`, so §2.4's bland-song fix never reaches the output. Falling out of all four:
+`UNRATED_FIT = 0.45` is cleared by 94–98% of both corpora, so `match_quality.genuine` reports
+"carries a label" while §1 counts it as an honesty mechanism.
+
+The audit also found the project healthier than its documentation: 676 tests pass at 90%
+coverage, both backends serve live, and library coverage is 79.4% against the 71.3% §3 had been
+quoting since the first crawl. Three claims had expired. Spotify credentials **are** configured —
+§7.7 and §7.16 each defer a Spotify arm on "no credentials configured here", and a live call
+there now returns a full ranked set with both track-level sources firing, so neither is blocked.
+`pyproject.toml` still described the project as YouTube-only, three backends on. And the CI
+coverage job measures `--cov=server`: 258 of 7,937 statements, pointed at the one file §7.9 had
+just emptied into `tools/`, while `ytmusic_client.py` (35%) and `spotify_client.py` (70%) — the
+provider translation layer where §6.6's bug lived — go unmeasured. That is §6.2's lesson
+inverted: not a coverage number standing in for a measurement, but a coverage number aimed at
+the wrong file after a refactor moved the code out from under it.
+
+Housekeeping, since an audit that leaves the clutter it found is half done: `~/.recom` went 122MB
+→ 69MB. The 50MB `store.db.backup-20260917` was inspected before being removed and turned out to
+hold `library_track = 1` — it is a snapshot of the damaged state `afe3a2f` was written to prevent,
+strictly worse than live on every table, so it had no recovery value. WALs were checkpointed
+(graph.db's alone was 4.3MB) and the stale `commendation.egg-info/` from the project's former name
+was dropped. Nothing tracked was touched.

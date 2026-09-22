@@ -91,8 +91,9 @@ YouTube's English-centric mood playlists barely touch. Artist propagation is wha
 without any API key; the Claude layer closes the rest. The `graph_atlas` layer attacks the same gap from
 the other side by searching for that catalogue by name, and unlike `atlas` it exists on every backend.
 
-After a full crawl, measured: **71.3% library coverage** — 553 songs from artist propagation, 480 from
-playlist membership.
+Measured on this account, 2026-09-21: **79.4% library coverage** — 1,417 of 1,784 songs, of which 683
+from playlist membership, 560 from artist propagation and 174 from the graph atlas. The first full
+crawl measured 71.3%; continuous indexing (`scripts/maintain.py`) is what moved it.
 
 ### Mood + one playlist
 
