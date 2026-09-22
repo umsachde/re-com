@@ -1484,6 +1484,175 @@ problem is a different shape of work than §7.16 was. Left for whoever picks up 
 defect next: it did not uniformly close, and a source-count fix (§7.13's original angle) will not
 help Arijit specifically while last.fm stays empty for those two titles.
 
+### 7.17 The mood space had no word for anger — *done; verified live, re-baselined, no mood regressed*
+
+Found from a user request: build a rage playlist after a breakup. The complaint that started
+it is the cleanest possible statement of the defect — *"break up angry should give me different
+results than break up sad"* — and it did not.
+
+**The symptom, measured live (YouTube, 2026-09-17), both via `feeling`:**
+
+| | `"break up sad"` | `"break up angry"` |
+| --- | --- | --- |
+| resolved target | v -0.70, e 0.25, t 0.35, d 0.85 | v -0.45, e 0.85, **t 0.90**, d 0.45 |
+| every returned song's own vector | v -0.70, e 0.25, t 0.35, d 0.85 | v **-0.05**, e **0.575**, t **0.40**, d 0.575 |
+| `mood_fit` | **1.00** | **0.698** |
+| what came back | genuine sad breakup songs | Clean Bandit *I Miss You*, Jason Aldean *Trouble With A Heartbreak* |
+
+Both targets resolved correctly — `parse_feeling` has had an honest rage vector since v2. The
+asymmetry is entirely in retrieval. "Sad" is a crawlable YouTube mood with 2,641 atlas tracks,
+so its request lands on tracks sitting exactly on the anchor at fit 1.00. The angry request had
+nothing to land on: all ten results carried **one identical mid-valence vector**, and all ten
+were still reported `genuine: 10, fluff_used: 0`.
+
+**The cause is structural, not a tuning problem.** A track's mood label can only ever land *on
+an anchor position* — `from_atlas_counts` blends `ANCHORS` by playlist count, and `graph_atlas`
+searches per anchor. So any target outside the anchors' convex hull is **unreachable**, however
+well `_FEELING_WORDS` describes it. Anger sat outside it: of the eleven YouTube moods, none has
+negative valence above energy 0.25 (that is `Sad`), and none has tension above 0.70 (that is
+`Workout`, at positive valence). The feeling lexicon could aim at rage; the corpus could not
+represent it. `recommend_for_mood`'s own `describe()` said so in every response and nobody read
+it: *"closest to Gaming/Workout"* for a heartbroken rage request.
+
+**Five anchors added**, all in the negative-valence/high-tension half that was empty:
+
+| anchor | valence | energy | tension | depth | why it is not an existing anchor |
+| --- | --- | --- | --- | --- | --- |
+| `Angry` | -0.55 | 0.85 | 0.90 | 0.40 | the gap itself; nothing was both negative and tense |
+| `Anxious` | -0.35 | 0.45 | 0.85 | 0.55 | high tension *without* high energy — dread, not rage |
+| `Heartbroken` | -0.60 | 0.35 | 0.55 | 0.85 | a breakup is not settled grief; it carries tension `Sad` does not |
+| `Nostalgic` | -0.05 | 0.35 | 0.20 | 0.85 | near-zero valence, very lyric-forward; `Sad` is far too low |
+| `Lonely` | -0.45 | 0.15 | 0.25 | 0.70 | quieter and less despairing than `Sad` |
+
+**Why five and not the dozen first sketched.** `Confident`, `Triumphant` and `Hopeful` were
+drafted and dropped on measurement: `Confident`/`Triumphant` sat 0.153 apart and
+`Romance`/`Hopeful` 0.171, both **tighter than the closest pre-existing pair**
+(`Energize`/`Party`, 0.185), in a positive-valence region `Energize`/`Party`/`Feel good`
+already retrieve well. An anchor is not free — `relative_fit` subtracts the mean fit across
+*all* anchors — so a near-duplicate makes two moods mutually indistinct and shifts every other
+mood's score to buy nothing. The rule this establishes: **add an anchor to reach a region
+retrieval cannot, not to name a feeling an existing anchor already serves.** All five shipped
+anchors clear the 0.185 bar (closest: `Sad`/`Heartbroken` 0.201, `Sad`/`Lonely` 0.215).
+
+**Reachability, before → after** (fit to the best available anchor, so how well the corpus can
+*ever* serve that word): angry 0.764 → 0.965, furious 0.737 → 0.964, rage 0.754 → 0.956,
+anxious 0.712 → 0.963, overwhelmed 0.733 → 0.958, nostalgic 0.823 → 1.000,
+bittersweet 0.831 → 0.958.
+
+**How a new mood actually gets a corpus — the part that is easy to get wrong.** `atlas.py` can
+only crawl moods YouTube itself files playlists under, and YouTube has no "Angry" shelf, so for
+all five the *entire* corpus is `graph_atlas`'s free-text Deezer playlist search. Adding an
+anchor without adding `graph_atlas.MOOD_QUERIES` phrasings therefore creates a mood that
+resolves as a target and can never have one track labelled near it — the exact bug above, newly
+minted. So:
+
+1. `moodspace.ANCHORS` — the position. Must clear 0.185 against every existing anchor.
+2. `graph_atlas.MOOD_QUERIES` — the phrasings, in folk language (`"songs to scream to"`, not
+   `"Angry"`; nobody titles a playlist after the taxonomy).
+3. `recommend._FEELING_WORDS` — point the words at the anchor *by name*, not at a free vector.
+   A free vector describes a mood; only an anchor retrieves one.
+4. Re-run the graph crawl (`build_graph_atlas`) so the new queries are fetched.
+
+`CRAWLABLE_MOODS` is consequently no longer `tuple(ANCHORS)` but the eleven-name YouTube
+taxonomy, so the two evidence paths stay honest about what each can actually get.
+
+**Pinned by tests, revert-checked.** Dropping the five anchors and repointing the lexicon fails
+4 tests: `test_the_anchors_cover_the_angry_corner_of_the_space`,
+`test_anger_words_resolve_onto_a_labelled_anchor`,
+`test_every_anchor_outside_youtubes_taxonomy_has_search_phrasings`, and
+`test_queries_cover_every_placeable_mood`. 676 pass with the change.
+`test_every_anchor_clears_the_tightest_pre_existing_separation` guards the 0.185 rule against
+the next person who adds a mood. Note that
+`test_breakup_angry_and_breakup_sad_are_not_the_same_request` does *not* fail on revert, and is
+not claimed to pin the fix: the two targets always differed, and the failure was in retrieval,
+which a unit test with no corpus cannot see.
+
+**Crawled and verified live, 2026-09-21.** The corpus was built (`build_graph_atlas.py`, all
+three stages) and the library index repaired first — it was reporting `library: 1, labelled: 1`
+against `trend_since_last_run.library_labelled: -1406`, so every request above ran with
+`seeds: []` and the seed stage dead. `scripts/label_library.py` restored it to **1,784 tracks,
+79.1% with a mood**. The crawl added 105 `(mood, query)` pairs: 231 → 336 queries,
+40,318 → 50,336 graph tracks, 1,008 → 1,247 playlists. Per-mood tracks for the five new
+anchors: `Nostalgic` 5,063, `Heartbroken` 2,627, `Angry` 2,207, `Anxious` 2,016, `Lonely` 1,832.
+
+Same two requests, same account, after:
+
+| | before | after |
+| --- | --- | --- |
+| `"break up angry"` reads as | *closest to Gaming/Workout* | *closest to **Angry/Anxious*** |
+| its results | Clean Bandit *I Miss You*, Jason Aldean *Trouble With A Heartbreak* | RATM *Testify*, AC/DC *Thunderstruck*, Metallica *Enter Sandman*, Guns N' Roses, Scorpions, NF |
+| best `mood_fit` | 0.698, on all ten identically | **1.00** |
+| distinct mood vectors in the pool | **1** | varied |
+| overlap with `"break up sad"` | effectively one pool | **none** |
+
+`"break up sad"` now reads as *closest to Sad/Heartbroken* and returns `genuine: 10/10` with
+zero filler. The defect is closed on the path it was reported on.
+
+**Operational note that cost a wasted measurement:** `moodspace` is imported by the long-running
+MCP server process, so an anchor change does **nothing** to live tool calls until that server is
+restarted. The first post-crawl verification run was scored against the old eleven anchors and
+had to be thrown away; the giveaway was `described` still saying *"closest to Gaming/Workout"*
+for a target that the new anchors place on `Angry` at fit 0.965. Check `described` before
+trusting any anchor measurement.
+
+**What is NOT done, and must not be reported as done.**
+
+**Re-baselined, 2026-09-21 — no regression, and the mood path's noise floor measured for the
+first time.** Three live runs on YouTube, same account. The "before" arm is a true revert:
+`moodspace.py`/`recommend.py`/`graph_atlas.py` restored to HEAD and **both atlases
+re-materialized against the 11 anchors** (`build_graph_atlas.py --stage materialize|propagate`,
+then `label_library.py --skip-sync`), because track vectors are computed from the anchor set and
+a stale materialization would have measured the new corpus with the old code.
+
+| metric | before (11) | after run 1 | after run 2 | run-to-run noise |
+| --- | --- | --- | --- | --- |
+| mean fit | 0.807 | 0.804 | 0.812 | ±0.008 |
+| cross-mood overlap | 0.054 | 0.039 | 0.025 | **±0.014** |
+| distinct / 80 slots | 66 | 69 | 73 | ±4 |
+| rated | 91% | 91% | 94% | ±3pp |
+| artists / 10 | 8.0 | 7.62 | 7.5 | ±0.12 |
+| `angry/mirror` fit | 0.650 | 0.639 | 0.677 | ±0.038 |
+| `nostalgic/mirror` fit | 0.746 | 0.817 | 0.785 | ±0.032 |
+
+**Mean fit does not compare across these arms, and reporting it as an improvement would be
+wrong.** The targets themselves moved: "angry" resolved to a free vector before and to the
+`Angry` anchor after, "nostalgic" and "heartbroken" likewise. Fit is measured against a
+different point in each arm, so a *lower* fit against a better-placed target is not a
+regression. Only result-set properties compare across arms: cross-mood overlap (0.054 →
+0.039/0.025), distinct songs (66 → 69/73), rated share (91% → 91/94%).
+
+On those, the change is directionally positive and **not proven**: the before/after gap on
+cross-mood overlap (0.015) is the same size as the noise band (±0.014) measured between two
+identical after-runs. Establishing it would need repeats on the before arm, each costing a full
+revert-and-re-materialize cycle. What can be said flatly is the negative result that was the
+actual worry — **no mood regressed**: every per-case delta, `Focus` and `Party` included, sits
+inside the run-to-run noise. `nostalgic` is the one case whose gain (+0.071/+0.039) exceeds its
+±0.032 band in both runs, which is what a newly-reachable target should look like.
+
+The mood path has no `--repeat`, unlike `--similarity`, so this noise floor had to be built by
+hand from two identical runs. It is wide — ±0.014 on cross-mood overlap and ±0.038 on a single
+case's fit — and any future mood A/B should be read against it rather than against a single pair
+of numbers. Compare the similarity path's documented ~0.87 (§7.2): that one is a different
+metric and not transferable.
+
+- **A pre-existing overlap this did not cause and did not fix.** `Workout/hold` vs
+  `angry/mirror` overlaps in all three runs (50%, 50%, 20%). It is not an artefact of the new
+  anchors — it is there with 11 — and §7.17's own mechanism explains it: `Workout` (v 0.35,
+  t 0.70) is the nearest *crawlable* mood to anger, so the editorial atlas's loud-and-tense
+  tracks are filed there and reach both requests.
+- **Expansion is still mood-blind, and it shows.** Two EDM tracks survived into the angry top
+  ten (Calvin Harris *Promises* at 0.724, Guetta *Without You* at 0.602). Per §4.4 mood picks
+  the seeds and the v1 radio/related/artist signals expand from there without reference to it,
+  so agreement can outrank fit — `Thunderstruck` came in at `signal_score` 6 against
+  `mood_fit` 0.657. Much reduced from the pre-fix state, not eliminated.
+- **The editorial atlas labels hard rock as positive-valence**, which is a separate defect this
+  work made visible. `Thunderstruck`'s own vector is valence **+0.46**, Guns N' Roses **+0.48**,
+  Metallica **+0.47** — all `mood_source: atlas`, i.e. YouTube files them under upbeat moods.
+  They reached the angry results on signal agreement, not on fit. The tracks that scored a true
+  1.00 were the `graph_atlas`-labelled ones (RATM). So the neutral corpus is reading anger more
+  honestly than the editorial one here, which inverts `label.SOURCE_PRIORITY`'s assumption for
+  this region of the space. Worth measuring before acting on.
+
 ---
 
 ## 8. Version history

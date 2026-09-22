@@ -79,6 +79,16 @@ MOOD_QUERIES: dict[str, tuple[str, ...]] = {
     "Workout":   ("workout", "gym", "running"),
     "Party":     ("party", "dance party", "club"),
     "Gaming":    ("gaming", "gaming mix", "epic gaming"),
+    # The moods with no editorial category anywhere (moodspace §7.17). For these
+    # five this search IS the corpus -- `atlas.py` cannot contribute a single
+    # track, because YouTube has no "Angry" shelf to crawl. Phrasings lean on how
+    # people actually title a rage playlist ("songs to scream to") rather than on
+    # the anchor's name, which nobody types.
+    "Angry":       ("angry songs", "rage", "songs to scream to"),
+    "Anxious":     ("anxiety", "overthinking", "restless songs"),
+    "Heartbroken": ("breakup songs", "heartbroken", "songs to cry to"),
+    "Nostalgic":   ("nostalgia", "throwback", "memories"),
+    "Lonely":      ("lonely", "alone at night", "empty"),
 }
 
 

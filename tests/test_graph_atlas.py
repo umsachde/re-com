@@ -53,6 +53,20 @@ def test_queries_cover_every_placeable_mood():
     assert moods == set(graph_atlas.MOOD_QUERIES) <= set(moodspace.ANCHORS)
 
 
+def test_every_anchor_outside_youtubes_taxonomy_has_search_phrasings():
+    """§7.17's footgun. `atlas.py` can only crawl `CRAWLABLE_MOODS`, so for any
+    other anchor this search IS the entire corpus. Adding an anchor without
+    phrasings here creates a mood that resolves as a target and can never have a
+    single track labelled near it -- which is exactly the bug §7.17 fixed."""
+    uncrawlable = set(moodspace.ANCHORS) - set(moodspace.CRAWLABLE_MOODS)
+    assert uncrawlable, "expected anchors beyond YouTube's own taxonomy"
+    assert uncrawlable <= set(graph_atlas.MOOD_QUERIES)
+
+
+def test_crawlable_moods_are_a_subset_of_the_anchors():
+    assert set(moodspace.CRAWLABLE_MOODS) <= set(moodspace.ANCHORS)
+
+
 def test_queries_are_not_english_only():
     """The 4.1% coverage problem, addressed directly.
 

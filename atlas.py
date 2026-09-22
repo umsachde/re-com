@@ -7,7 +7,9 @@ hundreds of editorial playlists. Membership in those playlists is the cheapest
 mood evidence available anywhere, so we crawl it once and keep it.
 
 Scale, measured: 2,223 playlists across the 13 moods, of which ~1,979 fall
-under the 11 moods that have an honest position in the vector space. At roughly
+under the 11 moods this module crawls (`moodspace.CRAWLABLE_MOODS`). Those are
+a subset of `moodspace.ANCHORS`, which also holds moods YouTube has no shelf for
+-- those get their corpus from `graph_atlas`'s playlist search instead (§7.17). At roughly
 a second each that's a ~35 minute crawl, which is why this is a resumable
 background job and never something a tool call does inline.
 

@@ -4,6 +4,7 @@ Same philosophy as test_server.py: hand-rolled fakes, no network, no
 credentials, no touching the developer's real store.
 """
 
+import itertools
 import time
 
 import pytest
@@ -45,6 +46,26 @@ def test_tension_separates_workout_from_party():
     party, workout = ms.ANCHORS["Party"], ms.ANCHORS["Workout"]
     assert abs(party["energy"] - workout["energy"]) < 0.15
     assert ms.fit(party, workout) < 0.85
+
+
+def test_every_anchor_clears_the_tightest_pre_existing_separation():
+    """An anchor is not free -- `relative_fit` subtracts the mean fit across all
+    of them, so a near-duplicate anchor makes two moods mutually indistinct and
+    shifts every other mood's score for nothing. The bar is the tightest pair
+    the eleven YouTube moods already had (Energize/Party, 0.185)."""
+    pairs = list(itertools.combinations(ms.ANCHORS.items(), 2))
+    closest = min((ms.distance(a, b), f"{x}/{y}") for (x, a), (y, b) in pairs)
+    assert closest[0] >= 0.185, f"{closest[1]} are closer than Energize/Party"
+
+
+def test_the_anchors_cover_the_angry_corner_of_the_space():
+    """§7.17. A label only ever lands ON an anchor, so a target outside their
+    hull is unreachable: "break up angry" resolved to tension 0.90 and then
+    retrieved ten identical mid-valence ballads, because nothing was labelled
+    anywhere near it. Some anchor must be angry -- negative valence AND high
+    tension -- or that failure comes straight back."""
+    angry = [v for v in ms.ANCHORS.values() if v["valence"] < -0.3 and v["tension"] > 0.75]
+    assert angry, "no anchor occupies the negative-valence, high-tension region"
 
 
 def test_blend_respects_weights():
@@ -403,6 +424,24 @@ def test_parse_feeling_matches_known_words():
 def test_parse_feeling_blends_multiple_hits():
     blended = recommend.parse_feeling("low and nostalgic")
     assert blended["valence"] < 0 and blended["depth"] > 0.7
+
+
+def test_breakup_angry_and_breakup_sad_are_not_the_same_request():
+    """§7.17's headline symptom, from the user's own words. Both resolved to
+    correct-looking targets before the fix and then retrieved the same ballads,
+    because "heartbroken" pointed at the Sad anchor and nothing was labelled
+    anywhere near anger. Anger must stay the louder, tenser of the two."""
+    angry = recommend.parse_feeling("break up angry")
+    sad = recommend.parse_feeling("break up sad")
+    assert angry["energy"] > sad["energy"] + 0.3
+    assert angry["tension"] > sad["tension"] + 0.3
+    assert ms.fit(angry, sad) < 0.7
+
+
+def test_anger_words_resolve_onto_a_labelled_anchor():
+    """A free vector can describe rage; only an anchor can retrieve it."""
+    for word in ("angry", "mad", "rage", "furious"):
+        assert recommend._FEELING_WORDS[word] == "Angry"
 
 
 def test_parse_feeling_returns_none_when_nothing_matches():

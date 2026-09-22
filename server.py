@@ -698,8 +698,10 @@ def recommend_for_mood(
                 done" far better than any keyword list.
       `feeling` Their words verbatim, as a fallback when you'd rather not
                 commit to numbers. Matched against a mood-word lexicon.
-      `context` One of: Chill, Sleep, Focus, Commute, Feel good, Romance,
-                Energize, Workout, Party, Gaming, Sad.
+      `context` One of: Chill, Sleep, Focus, Commute, Romance, Energize,
+                Workout, Party, Gaming, Sad, Angry, Anxious, Heartbroken,
+                Nostalgic, Lonely. ("Feel good" is spelt with a space and so
+                cannot be passed here; use `feeling` or `vector` for it.)
       If none are given, the mood is inferred from recent listening history.
 
     `arc` shapes the sequence rather than returning a flat mood-matched set:
