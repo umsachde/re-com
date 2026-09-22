@@ -1,7 +1,7 @@
 [project]
 name = "re-com"
 version = "0.2.0"
-description = "MCP server that recommends new songs by mood, guaranteed to exclude anything already in your library (backend: YouTube Music)"
+description = "MCP server that recommends new songs by mood, guaranteed to exclude anything already in your library (backends: YouTube Music, Spotify)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
