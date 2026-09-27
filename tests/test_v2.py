@@ -331,6 +331,32 @@ def test_genre_prior_is_none_without_a_genre_playlist(db):
     assert label.genre_prior(db, "a") is None
 
 
+def test_genre_labels_prefers_the_users_own_filing(db):
+    store.sync_library(db, [("a", "C - Punjabi", False)])
+    store.record_genre(db, "Hip-hop", ["a"])
+    # The human's own label wins outright rather than merging with the harvest.
+    assert label.genre_labels(db, "a") == {"Punjabi"}
+
+
+def test_genre_labels_falls_back_to_the_harvested_index(db):
+    # No "C - " playlists at all, which is the common case and used to make
+    # every genres=[...] filter match nothing.
+    store.sync_library(db, [("a", "Newest", False)])
+    store.record_genre(db, "Dance & electronic", ["a"])
+    assert label.genre_labels(db, "a") == {"Dance & electronic"}
+
+
+def test_genre_labels_is_empty_when_neither_layer_knows(db):
+    store.sync_library(db, [("a", "Newest", False)])
+    assert label.genre_labels(db, "a") == set()
+
+
+def test_known_genres_spans_both_layers(db):
+    store.sync_library(db, [("a", "C - Punjabi", False), ("b", "Newest", False)])
+    store.record_genre(db, "Dance & electronic", ["b"])
+    assert label.known_genres(db) >= {"Punjabi", "Dance & electronic"}
+
+
 def test_library_coverage_reports_zero_for_an_empty_library(db):
     assert label.library_coverage(db)["coverage"] == 0.0
 
@@ -502,6 +528,27 @@ def test_pick_seeds_respects_a_genre_filter(db):
     store.put_track_moods(db, "atlas", [(v, ms.ANCHORS["Sad"], 1.0) for v in ("a", "b")])
     seeds = recommend.pick_seeds(db, ms.ANCHORS["Sad"], genres=["Punjabi"])
     assert [s["videoId"] for s in seeds] == ["a"]
+
+
+def test_pick_seeds_genre_filter_works_without_the_playlist_convention(db):
+    # A library with no "C - <genre>" playlists. genre_prior() is None for
+    # every track here, so filtering on it alone matched nothing and returned
+    # no seeds at all -- the harvested genre index has to back it up.
+    store.sync_library(db, [("a", "Liked Music", True), ("b", "Liked Music", True)])
+    store.upsert_tracks(db, [{"videoId": "a", "artists": ["A"]}, {"videoId": "b", "artists": ["B"]}])
+    store.put_track_moods(db, "atlas", [(v, ms.ANCHORS["Sad"], 1.0) for v in ("a", "b")])
+    store.record_genre(db, "Dance & electronic", ["a"])
+    store.record_genre(db, "Metal", ["b"])
+    seeds = recommend.pick_seeds(db, ms.ANCHORS["Sad"], genres=["Dance & electronic"])
+    assert [s["videoId"] for s in seeds] == ["a"]
+
+
+def test_pick_seeds_genre_filter_still_returns_nothing_for_an_unknown_genre(db):
+    store.sync_library(db, [("a", "Liked Music", True)])
+    store.upsert_tracks(db, [{"videoId": "a", "artists": ["A"]}])
+    store.put_track_moods(db, "atlas", [("a", ms.ANCHORS["Sad"], 1.0)])
+    store.record_genre(db, "Metal", ["a"])
+    assert recommend.pick_seeds(db, ms.ANCHORS["Sad"], genres=["Nonsense"]) == []
 
 
 def test_pick_seeds_on_an_empty_library_returns_nothing(db):
@@ -1647,3 +1694,76 @@ def test_tempo_note_reports_a_hard_range():
          "unknown_tempo_kept": 0, "dropped_out_of_range": 25}
     )
     assert "90-110bpm" in note and "25 dropped as out of range" in note
+
+
+def _big_library(db, moods=True, genre=None):
+    """A library above store.SHRINK_GUARD_MIN_PREVIOUS, so the seed notes under
+    test are reached rather than the "last sync failed" branch."""
+    n = store.SHRINK_GUARD_MIN_PREVIOUS + 5
+    ids = [f"v{i}" for i in range(n)]
+    store.sync_library(db, [(v, "Liked Music", True) for v in ids])
+    store.upsert_tracks(db, [{"videoId": v, "title": v.upper(), "artists": [f"A{i}"]}
+                             for i, v in enumerate(ids)])
+    if moods:
+        store.put_track_moods(db, "atlas", [(v, ms.ANCHORS["Sad"], 0.9) for v in ids])
+    if genre:
+        store.record_genre(db, genre, ids)
+    return ids
+
+
+def test_build_blames_the_genre_filter_not_mood_coverage(db):
+    """An empty seed pool has two causes; the note has to name the right one.
+
+    Measured before this: a Workout request with genres=["Dance & electronic"]
+    reported missing mood coverage while six library tracks sat at fit >= 0.93,
+    sending the reader off to re-run an indexing script that changes nothing.
+    """
+    ids = _big_library(db, genre="Metal")
+    # Classical is a real genre in the index, but no mood-labelled track is in
+    # it -- so the filter is valid and still empties the pool.
+    store.record_genre(db, "Classical", ["unlabelled"])
+    yt = _BuildYT({v: [] for v in ids})
+
+    result = recommend.build(
+        yt, db, exclude=set(ids), feeling="heartbroken",
+        genres=["Classical"], limit=3,
+    )
+    note = " ".join(result["notes"])
+    assert "genre restriction emptied the seed pool" in note
+    assert "not a genre in this index" not in note
+    assert "carry a mood label" not in note
+
+
+def test_build_says_so_when_a_requested_genre_is_not_in_the_index(db):
+    ids = _big_library(db, genre="Metal")
+    yt = _BuildYT({v: [] for v in ids})
+
+    result = recommend.build(
+        yt, db, exclude=set(ids), feeling="heartbroken",
+        genres=["Nonsense Genre"], limit=3,
+    )
+    note = " ".join(result["notes"])
+    assert "not a genre in this index" in note
+    assert "Metal" in note  # tells them what they could have asked for
+    assert "carry a mood label" not in note
+
+
+def test_build_blames_mood_coverage_when_nothing_is_labelled(db):
+    """pick_seeds has no distance cutoff -- it ranks by fit and takes the best
+    `count`. So with no genre filter, an empty pool means the library carries no
+    mood labels at all, which is what this note is for."""
+    ids = _big_library(db, moods=False)
+    yt = _BuildYT({v: [] for v in ids})
+    result = recommend.build(yt, db, exclude=set(ids), feeling="sleepy", limit=3)
+    note = " ".join(result["notes"])
+    assert "carry a mood label" in note
+    assert "genre" not in note
+
+
+def test_build_mood_note_does_not_claim_a_distance_cutoff(db):
+    """A far-from-target label still seeds, so the note must not fire."""
+    ids = _big_library(db)  # all labelled Sad
+    yt = _BuildYT({v: [] for v in ids})
+    result = recommend.build(yt, db, exclude=set(ids), feeling="hyped", limit=3)
+    assert recommend.pick_seeds(db, ms.ANCHORS["Energize"])  # Sad tracks still seed
+    assert not any("carry a mood label" in n for n in result["notes"])

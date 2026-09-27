@@ -167,6 +167,44 @@ def genre_prior(conn: Any, video_id: str) -> str | None:
     return None
 
 
+def genre_labels(conn: Any, video_id: str) -> set[str]:
+    """Every genre name a song can be filtered by; the stronger layer wins.
+
+    genre_prior() alone is what `genres=[...]` used to filter on, which made
+    the parameter inert for anyone not using the "C - <genre>" naming
+    convention: genre_prior() returns None for every track, so every genre
+    filter matched nothing and emptied the seed pool. Measured on this library
+    -- zero "C - " playlists, so `genres=["Dance & electronic"]` could only
+    ever return no seeds, and the caller reported that as missing mood
+    coverage.
+
+    The harvested genre-category index (store.genres_for) covers the same
+    library far more broadly, so it backs the human filing up rather than
+    replacing it. The user's own label still wins when present, because it is
+    the only layer that knows their filing.
+    """
+    own = genre_prior(conn, video_id)
+    if own:
+        return {own}
+    return set(store.genres_for(conn, video_id))
+
+
+def known_genres(conn: Any) -> set[str]:
+    """The genre names `genres=[...]` can actually match, across both layers.
+
+    Lets a caller say which genres exist instead of reporting an unmatchable
+    name as an absence of music.
+    """
+    own = {
+        row["playlist_title"][len(GENRE_PREFIX):]
+        for row in conn.execute(
+            "SELECT DISTINCT playlist_title FROM library_track WHERE playlist_title LIKE ?",
+            (GENRE_PREFIX + "%",),
+        )
+    }
+    return own | set(store.genre_stats(conn)["genres"])
+
+
 def propagate_by_artist(conn: Any) -> int:
     """Give unlabelled songs their artist's average mood.
 
