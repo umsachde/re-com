@@ -92,6 +92,24 @@ _SCRIPT_LANGUAGE = [
 NON_ENGLISH = {"indian", "punjabi", "hindi", "arabic", "korean", "japanese",
                "chinese", "french", "latin", "portuguese", "african"}
 
+# Language umbrellas: a broad label and the specific ones it can turn out to be.
+#
+# YouTube's taxonomy files every Indian-language track under "Bollywood &
+# Indian", so `indian` is not really a language -- it is what a track gets when
+# the evidence could not narrow past the subcontinent. Only the library layer
+# separates Hindi from Punjabi, so a corpus can easily carry 21 artists
+# labelled `hindi` and 267 labelled `indian`. Matching a request exactly
+# against that drops nearly the whole catalogue the filter is about, and
+# reports the loss as "wrong language", which it is not.
+#
+# The widening is deliberately asymmetric in meaning. Asking for the umbrella
+# accepts its members, because a Hindi song genuinely is an Indian one. Asking
+# for a member accepts the umbrella only because the umbrella is ambiguous --
+# never because the two are equivalent. A track labelled `punjabi` therefore
+# still fails a `hindi` filter, preserving the split the library layer exists
+# to capture.
+LANGUAGE_UMBRELLA = {"indian": frozenset({"hindi", "punjabi"})}
+
 SOURCE_SCRIPT, SOURCE_LIBRARY, SOURCE_GENRE, SOURCE_ARTIST = "script", "library", "genre", "artist"
 _PRIORITY = {SOURCE_SCRIPT: 0, SOURCE_LIBRARY: 1, SOURCE_GENRE: 2, SOURCE_ARTIST: 3}
 
@@ -334,6 +352,29 @@ def as_languages(value: Any) -> list[str] | None:
     return out or None
 
 
+def accepted_languages(wanted: Iterable[str]) -> set[str]:
+    """The labels that can legitimately satisfy a language request.
+
+    Adds each requested umbrella's members, and the umbrella of each requested
+    member. See LANGUAGE_UMBRELLA for why the second direction is needed.
+
+    Widening is one level deep and reads only what was actually requested, so
+    the result cannot depend on LANGUAGE_UMBRELLA's iteration order. Testing
+    against the set as it grows would chain umbrellas together -- given a
+    hypothetical {"indian": {"hindi", ...}, "subcontinent": {"indian", ...}},
+    asking for `hindi` would reach `subcontinent` or not depending purely on
+    which key came first.
+    """
+    requested = {w.lower() for w in wanted}
+    accepted = set(requested)
+    for umbrella, members in LANGUAGE_UMBRELLA.items():
+        if umbrella in requested:
+            accepted |= members
+        if requested & members:
+            accepted.add(umbrella)
+    return accepted
+
+
 def matches(language: str | None, wanted: Iterable[str] | None, exclude: Iterable[str] | None) -> bool | None:
     """Whether a song passes a language filter. None means unknown.
 
@@ -347,7 +388,7 @@ def matches(language: str | None, wanted: Iterable[str] | None, exclude: Iterabl
         wanted = {w.lower() for w in wanted}
         if "english" in wanted and language in NON_ENGLISH:
             return False
-        return language.lower() in wanted
+        return language.lower() in accepted_languages(wanted)
     if exclude:
         return language.lower() not in {e.lower() for e in exclude}
     return True

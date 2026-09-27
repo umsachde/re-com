@@ -346,6 +346,42 @@ def test_matches(language, want, exclude, expected):
     assert taxonomy.matches(language, want, exclude) is expected
 
 
+@pytest.mark.parametrize(
+    "language,want,expected",
+    # `indian` is the umbrella YouTube's taxonomy assigns when it can't narrow
+    # past the subcontinent, so asking for a member language has to accept it --
+    # otherwise a Bollywood filter drops the Bollywood.
+    [("indian", ["hindi"], True), ("indian", ["punjabi"], True),
+     ("hindi", ["indian"], True), ("punjabi", ["indian"], True),
+     ("indian", ["indian"], True),
+     # ...but the umbrella is ambiguity, not equivalence: the Hindi/Punjabi
+     # split that the library layer exists to capture must survive.
+     ("punjabi", ["hindi"], False), ("hindi", ["punjabi"], False),
+     # and widening must not leak across unrelated umbrellas or into English.
+     ("indian", ["english"], False), ("korean", ["hindi"], False),
+     ("indian", ["hindi", "korean"], True)],
+)
+def test_matches_language_umbrella(language, want, expected):
+    assert taxonomy.matches(language, want, None) is expected
+
+
+def test_accepted_languages_does_not_chain_umbrellas(monkeypatch):
+    """Widening is one level, so the result can't depend on dict order.
+
+    Reading the set as it grows would let `hindi` reach `subcontinent` via
+    `indian` when "indian" happens to be iterated first, and not when it isn't.
+    """
+    nested = {
+        "indian": frozenset({"hindi", "punjabi"}),
+        "subcontinent": frozenset({"indian", "urdu"}),
+    }
+    monkeypatch.setattr(taxonomy, "LANGUAGE_UMBRELLA", nested)
+    assert taxonomy.accepted_languages(["hindi"]) == {"hindi", "indian"}
+
+    monkeypatch.setattr(taxonomy, "LANGUAGE_UMBRELLA", dict(reversed(list(nested.items()))))
+    assert taxonomy.accepted_languages(["hindi"]) == {"hindi", "indian"}
+
+
 # --- filters ----------------------------------------------------------------
 
 
