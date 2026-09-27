@@ -188,8 +188,8 @@ def pick_seeds(conn: Any, target: dict[str, float], count: int = SEED_COUNT, gen
     for video_id, entry in moods.items():
         track = store.get_track(conn, video_id) or {}
         if genre_filter:
-            genre = label.genre_prior(conn, video_id)
-            if not genre or genre.lower() not in genre_filter:
+            genres_here = {g.lower() for g in label.genre_labels(conn, video_id)}
+            if not genres_here & genre_filter:
                 continue
         scored.append(
             {
@@ -634,7 +634,12 @@ def build(
         resolved = resolve_target(conn, yt if use_history else None, feeling, vector, context)
     target = resolved["target"]
 
-    if seeds is None:
+    # Whether `genres` had any say in the seed pool. A caller that supplies its
+    # own seeds (recommend_from_playlist_for_mood) has already applied its own
+    # selection, so an empty pool there is nothing to do with the genre filter
+    # and must not be reported as though it were.
+    seeded_from_library = seeds is None
+    if seeded_from_library:
         seeds = pick_seeds(conn, target, genres=genres)
     notes = list(resolved.get("evidence", []))
 
@@ -660,11 +665,43 @@ def build(
                 "only rebuilds the exclusion cache)."
             )
         else:
-            notes.append(
-                f"None of the {library_size} indexed library tracks carry a mood close "
-                "enough to this one to seed from. Mood coverage, not the request, is "
-                "the limit here -- index_status shows how much of the library is labelled."
+            # "close enough" overstated what pick_seeds does: it ranks by fit
+            # and takes the best `count`, with no distance cutoff, so without a
+            # genre filter an empty pool means nothing in the library carries a
+            # mood label at all -- never that the labels were too far away.
+            no_mood_match = (
+                f"None of the {library_size} indexed library tracks carry a mood label, so "
+                "there is nothing to seed from. Mood coverage, not the request, is the "
+                "limit here -- index_status shows how much of the library is labelled, and "
+                "scripts/label_library.py fills it in."
             )
+            # With `genres` in play, an empty pool has two very different
+            # causes, and naming the wrong one sends the reader off to re-run an
+            # indexing script that would change nothing. Measured: a Workout
+            # request with genres=["Dance & electronic"] reported missing mood
+            # coverage while six library tracks sat at fit >= 0.93. So ask the
+            # mood on its own -- once, only on this failure path -- and let the
+            # answer decide which note is true.
+            unfiltered = pick_seeds(conn, target) if (genres and seeded_from_library) else []
+            if not unfiltered:
+                notes.append(no_mood_match)
+            else:
+                known = label.known_genres(conn)
+                unknown = [g for g in genres if g.lower() not in {k.lower() for k in known}]
+                asked = ", ".join(genres)
+                if unknown:
+                    notes.append(
+                        f"No seeds matched genres ({asked}): {', '.join(unknown)} is not a "
+                        "genre in this index, so the filter could not match anything. The "
+                        f"mood itself had {len(unfiltered)} seed(s). Known genres: "
+                        f"{', '.join(sorted(known))}."
+                    )
+                else:
+                    notes.append(
+                        f"No library track is both close to this mood and in ({asked}), so "
+                        "the genre restriction emptied the seed pool -- the mood itself had "
+                        f"{len(unfiltered)} seed(s). Drop `genres` to search the whole library."
+                    )
 
     # The graph, threaded through exactly as the v1 similarity tools do. v6
     # wired it into `recommend_from_song`/`recommend_from_playlist` and not
