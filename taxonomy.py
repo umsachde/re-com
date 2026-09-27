@@ -357,12 +357,20 @@ def accepted_languages(wanted: Iterable[str]) -> set[str]:
 
     Adds each requested umbrella's members, and the umbrella of each requested
     member. See LANGUAGE_UMBRELLA for why the second direction is needed.
+
+    Widening is one level deep and reads only what was actually requested, so
+    the result cannot depend on LANGUAGE_UMBRELLA's iteration order. Testing
+    against the set as it grows would chain umbrellas together -- given a
+    hypothetical {"indian": {"hindi", ...}, "subcontinent": {"indian", ...}},
+    asking for `hindi` would reach `subcontinent` or not depending purely on
+    which key came first.
     """
-    accepted = {w.lower() for w in wanted}
+    requested = {w.lower() for w in wanted}
+    accepted = set(requested)
     for umbrella, members in LANGUAGE_UMBRELLA.items():
-        if umbrella in accepted:
+        if umbrella in requested:
             accepted |= members
-        if accepted & members:
+        if requested & members:
             accepted.add(umbrella)
     return accepted
 

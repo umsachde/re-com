@@ -365,6 +365,23 @@ def test_matches_language_umbrella(language, want, expected):
     assert taxonomy.matches(language, want, None) is expected
 
 
+def test_accepted_languages_does_not_chain_umbrellas(monkeypatch):
+    """Widening is one level, so the result can't depend on dict order.
+
+    Reading the set as it grows would let `hindi` reach `subcontinent` via
+    `indian` when "indian" happens to be iterated first, and not when it isn't.
+    """
+    nested = {
+        "indian": frozenset({"hindi", "punjabi"}),
+        "subcontinent": frozenset({"indian", "urdu"}),
+    }
+    monkeypatch.setattr(taxonomy, "LANGUAGE_UMBRELLA", nested)
+    assert taxonomy.accepted_languages(["hindi"]) == {"hindi", "indian"}
+
+    monkeypatch.setattr(taxonomy, "LANGUAGE_UMBRELLA", dict(reversed(list(nested.items()))))
+    assert taxonomy.accepted_languages(["hindi"]) == {"hindi", "indian"}
+
+
 # --- filters ----------------------------------------------------------------
 
 
