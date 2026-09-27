@@ -1767,3 +1767,18 @@ def test_build_mood_note_does_not_claim_a_distance_cutoff(db):
     result = recommend.build(yt, db, exclude=set(ids), feeling="hyped", limit=3)
     assert recommend.pick_seeds(db, ms.ANCHORS["Energize"])  # Sad tracks still seed
     assert not any("carry a mood label" in n for n in result["notes"])
+
+
+def test_build_does_not_blame_genres_for_caller_supplied_seeds(db):
+    """A caller that passes its own seeds (recommend_from_playlist_for_mood) has
+    already done its own selection, so an empty pool there is not the genre
+    filter's doing and must not be reported as though it were."""
+    ids = _big_library(db, genre="Metal")
+    yt = _BuildYT({v: [] for v in ids})
+    result = recommend.build(
+        yt, db, exclude=set(ids), feeling="heartbroken",
+        genres=["Metal"], seeds=[], limit=3,
+    )
+    note = " ".join(result["notes"])
+    assert "genre restriction emptied the seed pool" not in note
+    assert "not a genre in this index" not in note

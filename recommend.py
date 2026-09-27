@@ -634,7 +634,12 @@ def build(
         resolved = resolve_target(conn, yt if use_history else None, feeling, vector, context)
     target = resolved["target"]
 
-    if seeds is None:
+    # Whether `genres` had any say in the seed pool. A caller that supplies its
+    # own seeds (recommend_from_playlist_for_mood) has already applied its own
+    # selection, so an empty pool there is nothing to do with the genre filter
+    # and must not be reported as though it were.
+    seeded_from_library = seeds is None
+    if seeded_from_library:
         seeds = pick_seeds(conn, target, genres=genres)
     notes = list(resolved.get("evidence", []))
 
@@ -677,8 +682,8 @@ def build(
             # coverage while six library tracks sat at fit >= 0.93. So ask the
             # mood on its own -- once, only on this failure path -- and let the
             # answer decide which note is true.
-            unfiltered = pick_seeds(conn, target) if genres else []
-            if not genres or not unfiltered:
+            unfiltered = pick_seeds(conn, target) if (genres and seeded_from_library) else []
+            if not unfiltered:
                 notes.append(no_mood_match)
             else:
                 known = label.known_genres(conn)
